@@ -1,0 +1,13 @@
+{
+    "folders": [
+        {
+            "path": "."
+        },
+        {
+            "name": "M72_Gripper",
+            "path": ".."
+        }
+    ],
+    "settings": {},
+    "extensions": {}
+}
