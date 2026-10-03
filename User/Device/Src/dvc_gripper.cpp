@@ -27,9 +27,10 @@ void Class_Gripper::Init()
     // 成员电机初始化
     DM_Motor_Rotary.Init(&hfdcan1, DM_Motor_ID_0xA1, DM_Motor_Control_Method_MIT_POSITION, 0, 20.94359f, 10.0f);
     DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_ANGLE, 36.0f, 10000.0f);
-    
+
+    // 电机控制参数初始化
     DJI_Motor_Clamp.PID_Omega.Init(1000.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6000.0f);
-    DJI_Motor_Clamp.PID_Angle.Init(10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 20.0f);
+    DJI_Motor_Clamp.PID_Angle.Init(12.0f, 0.0f, 0.0f, 0.0f, 0.0f, 20.0f);
 
     // 父类状态机类初始化
     Class_FSM::Init(10, 0);
