@@ -22,6 +22,33 @@
 #define LENGTH2RAD 1.0f
 /* Exported types ------------------------------------------------------------*/
 
+// 特化类达妙电机控制方式枚举
+enum Enum_DM_Motor_PID_Control_Method
+{
+    DM_Motor_Control_Method_PID_OPENLOOP = 0,
+    DM_Motor_Control_Method_PID_OMEGA,
+    DM_Motor_Control_Method_PID_POSITION,
+};
+
+// 特化类达妙电机，支持在MIT模式下进行PID控制
+class Class_DM_Motor_J4310_PID : public Class_DM_Motor_J4310
+{
+public:
+    Class_PID PID_Omega;
+    Class_PID PID_Position;
+
+    void Init(FDCAN_HandleTypeDef *hcan, Enum_DM_Motor_ID __CAN_ID, Enum_DM_Motor_PID_Control_Method __Control_Method = DM_Motor_Control_Method_PID_OPENLOOP, int32_t __Position_Offset = 0, float __Omega_Max = 20.94359f, float __Torque_Max = 10.0f);
+
+    inline void Set_DM_Motor_Control_Method(Enum_DM_Motor_PID_Control_Method __DM_Motor_Control_Method);
+    inline Enum_DM_Motor_PID_Control_Method Get_DM_Motor_Control_Method();
+    
+    void TIM_PID_PeriodElapsedCallback();
+
+private:
+    Enum_DM_Motor_PID_Control_Method DM_Motor_PID_Control_Method = DM_Motor_Control_Method_PID_OPENLOOP;
+};
+
+
 // 夹爪控制状态枚举
 enum Enum_Gripper_Control_Type
 {
@@ -79,7 +106,7 @@ public:
 
 private:
     // 成员电机子类
-    Class_DM_Motor_J4310 DM_Motor_Rotary;
+    Class_DM_Motor_J4310_PID DM_Motor_Rotary;
     Class_DJI_Motor_C610 DJI_Motor_Clamp;
 
     //夹爪自身控制状态
@@ -107,6 +134,10 @@ private:
     // 夹爪运动学正逆解算，将目标Yaw角度及速度，张合长度及速度逆解算为两个电机的目标角度及速度；读取电机返回数据正解算为夹爪Yaw和张合运动
     void Calculate_Kinematics();
 };
+
+/* Exported variables --------------------------------------------------------*/
+
+/* Exported function declarations --------------------------------------------*/
 
 inline void Class_Gripper::Set_Target_Roll_Radian(float __Target_Roll_Radian)
 {
@@ -166,6 +197,16 @@ inline Enum_DM_Motor_Status Class_Gripper::Get_DM_Motor_Rotary_Status()
 inline Enum_DJI_Motor_Status Class_Gripper::Get_DJI_Motor_Clamp_Status()
 {
     return DJI_Motor_Clamp.Get_DJI_Motor_Status();
+}
+
+inline void Class_DM_Motor_J4310_PID::Set_DM_Motor_Control_Method(Enum_DM_Motor_PID_Control_Method __DM_Motor_Control_Method)
+{
+    DM_Motor_PID_Control_Method = __DM_Motor_Control_Method;
+}
+
+inline Enum_DM_Motor_PID_Control_Method Class_DM_Motor_J4310_PID::Get_DM_Motor_Control_Method()
+{
+    return DM_Motor_PID_Control_Method;
 }
 
 #endif

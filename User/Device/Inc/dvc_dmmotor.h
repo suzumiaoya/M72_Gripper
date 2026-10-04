@@ -161,7 +161,7 @@ protected:
     //常量
     
     //一圈位置刻度
-    uint32_t Position_Max = 65536;
+    int32_t Position_Max = 65536;
 
     //内部变量
 
