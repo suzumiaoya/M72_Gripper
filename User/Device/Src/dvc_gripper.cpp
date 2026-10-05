@@ -55,6 +55,8 @@ void Class_DM_Motor_J4310_PID::TIM_PID_PeriodElapsedCallback()
         {
             PID_Position.Set_Target(Get_Target_Angle());
             PID_Position.Set_Now(Get_Now_Angle());
+            // 根据 Target_Omega 为位置环设置最大限幅，即最大旋转转速
+            // PID_Position.Set_Out_Max(Math_Abs(Get_Target_Omega()));
             PID_Position.TIM_Adjust_PeriodElapsedCallback();
 
             PID_Omega.Set_Target(PID_Position.Get_Out());
@@ -77,14 +79,16 @@ void Class_DM_Motor_J4310_PID::TIM_PID_PeriodElapsedCallback()
 void Class_Gripper::Init()
 {
     // 成员电机初始化
-    DM_Motor_Rotary.Init(&hfdcan1, DM_Motor_ID_0xA6, DM_Motor_Control_Method_PID_POSITION, 0, 50.0f, 5.0f);
-    DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_ANGLE, 36.0f, 10000.0f);
+    DM_Motor_Rotary.Init(&hfdcan1, DM_Motor_ID_0xA6, DM_Motor_Control_Method_PID_OPENLOOP, 0, 50.0f, 5.0f);
+    DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_OPENLOOP, 36.0f, 10000.0f);
+    DM_Motor_Rotary.Set_Target_Torque(0.0f);
+    DJI_Motor_Clamp.Set_Out(0.0f);
 
     // 电机控制参数初始化
-    DJI_Motor_Clamp.PID_Omega.Init(1000.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6000.0f);
-    DJI_Motor_Clamp.PID_Angle.Init(12.0f, 0.0f, 0.0f, 0.0f, 0.0f, 20.0f);
-    DM_Motor_Rotary.PID_Omega.Init(0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
-    DM_Motor_Rotary.PID_Position.Init(8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 8.0f);
+    DJI_Motor_Clamp.PID_Omega.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6000.0f);
+    DJI_Motor_Clamp.PID_Angle.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 20.0f);
+    DM_Motor_Rotary.PID_Omega.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
+    DM_Motor_Rotary.PID_Position.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
 
     // 父类状态机类初始化
     Class_FSM::Init(10, 0);
@@ -105,6 +109,8 @@ void Class_Gripper::Output()
     else // 失能模式
     {
         DM_Motor_Rotary.Set_DM_Control_Status(DM_Motor_Control_Status_DISABLE);
+        DM_Motor_Rotary.Set_DM_Motor_Control_Method(DM_Motor_Control_Method_PID_OPENLOOP);
+        DM_Motor_Rotary.Set_Target_Torque(0.0f);
 
         DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OPENLOOP);
         DJI_Motor_Clamp.Set_Out(0.0f);
