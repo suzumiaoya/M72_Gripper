@@ -126,7 +126,10 @@ private:
 
     float Target_DM_Radian = 0.0f;
     float Target_DM_Omega = 0.0f;
-    float Target_DJI_Radian = 0.0f;
+    float Target_DJI_Omega_Radian = 0.0f;
+
+    // 夹爪张合位置外环, 输出M2006主动开合修正速度
+    Class_PID PID_Clamp;
 
     Struct_Gripper_Data Gripper_Data = {};
 

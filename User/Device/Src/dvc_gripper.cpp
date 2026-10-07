@@ -30,6 +30,9 @@
 // M2006角速度环参数及输出限幅
 #define GRIPPER_DJI_OMEGA_KP 1000.0f
 #define GRIPPER_DJI_OUTPUT_MAX 9000.0f
+// 夹爪张合位置外环参数及M2006目标角速度限幅
+#define GRIPPER_CLAMP_POSITION_KP 10.0f
+#define GRIPPER_DJI_OMEGA_MAX 20.0f
 // 堵转阈值只由校准目标速度计算, 不使用带噪声的实时反馈速度
 #define GRIPPER_CALI_CURRENT_RATIO 0.9f
 #define GRIPPER_CALI_CURRENT_CALCULATED (GRIPPER_CALI_CURRENT_RATIO * GRIPPER_DJI_OMEGA_KP * (-GRIPPER_CALI_OMEGA))
@@ -104,7 +107,7 @@ void Class_Gripper::Init()
 
     // 电机控制参数初始化
     DJI_Motor_Clamp.PID_Omega.Init(GRIPPER_DJI_OMEGA_KP, 0.0f, 0.0f, 0.0f, 0.0f, GRIPPER_DJI_OUTPUT_MAX);
-    DJI_Motor_Clamp.PID_Angle.Init(12.0f, 0.0f, 0.0f, 0.0f, 0.0f, 20.0f);
+    PID_Clamp.Init(GRIPPER_CLAMP_POSITION_KP, 0.0f, 0.0f, 0.0f, 0.0f, GRIPPER_DJI_OMEGA_MAX);
     // DM_Motor_Rotary.PID_Omega.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
     // DM_Motor_Rotary.PID_Position.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
 
@@ -145,8 +148,8 @@ void Class_Gripper::Output()
         DM_Motor_Rotary.Set_Target_Angle(Target_DM_Radian);
         DM_Motor_Rotary.Set_Target_Omega(Target_DM_Omega);
 
-        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_ANGLE);
-        DJI_Motor_Clamp.Set_Target_Radian(Target_DJI_Radian);
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OMEGA);
+        DJI_Motor_Clamp.Set_Target_Omega_Radian(Target_DJI_Omega_Radian);
     }
     else // 失能、未校准、校准失败或电机离线时安全停机
     {
@@ -248,7 +251,8 @@ void Class_Gripper::Reload_TIM_Status_PeriodElapsedCallback()
                 // 状态切换当周期先保持当前位置, 下一周期再执行上层最新目标
                 Target_DM_Radian = Now_DM_Radian;
                 Target_DM_Omega = 0.0f;
-                Target_DJI_Radian = Now_DJI_Radian;
+                Target_DJI_Omega_Radian = 0.0f;
+                PID_Clamp.Set_Integral_Error(0.0f);
                 Cali_Stall_Count = 0;
                 Set_Cali_Status(Gripper_Cali_Status_CALIBRATED);
             }
@@ -335,7 +339,13 @@ void Class_Gripper::Calculate_Kinematics()
         Target_DM_Radian = Now_DM_Radian - Delta_Target_Roll_Radian;
         Target_Roll_Total_Radian = -Target_DM_Radian;
         Target_DM_Omega = -Target_Roll_Omega_Radian;
-        Target_DJI_Radian = Clamp_Open_Offset_Radian + Target_Clamp_Radian - GRIPPER_DM_FOLLOW_RATIO * Target_DM_Radian;
+
+        // 夹爪张合位置外环输出主动开合速度, DM实际角速度前馈抵消Roll运动引起的被动开合
+        PID_Clamp.Set_Target(Target_Clamp_Radian);
+        PID_Clamp.Set_Now(Gripper_Data.Now_Clamp_Radian);
+        PID_Clamp.TIM_Adjust_PeriodElapsedCallback();
+        Target_DJI_Omega_Radian = PID_Clamp.Get_Out() - GRIPPER_DM_FOLLOW_RATIO * DM_Motor_Rotary.Get_Now_Omega();
+        Math_Constrain(&Target_DJI_Omega_Radian, -GRIPPER_DJI_OMEGA_MAX, GRIPPER_DJI_OMEGA_MAX);
     }
 }
 
