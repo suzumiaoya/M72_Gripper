@@ -16,6 +16,7 @@
 
 #include "drv_math.h"
 #include "drv_can.h"
+#include "dvc_dwt.h"
 
 /* Exported macros -----------------------------------------------------------*/
 
@@ -151,6 +152,10 @@ protected:
     Enum_DM_Motor_ID CAN_ID;
     //发送缓存区
     uint8_t *CAN_Tx_Data;
+    //发送时间戳 (DWT)
+    uint32_t Tx_DWT_CNT = 0;
+    //接收延迟时间 (s)
+    float Rx_Delay_Time = 0.0f;
     //位置反馈偏移
     uint32_t Position_Offset;
     //最大速度, 调参助手设置, 推荐20.94359, 也就是最大转速200rpm

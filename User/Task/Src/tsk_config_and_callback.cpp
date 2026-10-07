@@ -213,14 +213,10 @@ void Gimbal_Device_CAN1_Callback(Struct_CAN_Rx_Buffer *CAN_RxMessage)
 {
     switch (CAN_RxMessage->Header.Identifier)
     {
-        case (0x16):
-        {
-            chariot.Gimbal.Gripper.DM_Motor_Rotary_CAN_RxCpltCallback(CAN_RxMessage->Data);
-        }
-        case (0x204):
-        {
-            chariot.Gimbal.Gripper.DJI_Motor_Clamp_CAN_RxCpltCallback(CAN_RxMessage->Data);
-        }
+    case (0x204):
+    {
+        chariot.Gimbal.Gripper.DJI_Motor_Clamp_CAN_RxCpltCallback(CAN_RxMessage->Data);
+    }
     }
 }
 #endif
@@ -235,6 +231,10 @@ void Gimbal_Device_CAN2_Callback(Struct_CAN_Rx_Buffer *CAN_RxMessage)
 {
     switch (CAN_RxMessage->Header.Identifier)
     {
+    case (0x16):
+    {
+        chariot.Gimbal.Gripper.DM_Motor_Rotary_CAN_RxCpltCallback(CAN_RxMessage->Data);
+    }
     }
 }
 #endif

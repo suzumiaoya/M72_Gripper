@@ -106,7 +106,7 @@ public:
 
 private:
     // 成员电机子类
-    Class_DM_Motor_J4310_PID DM_Motor_Rotary;
+    Class_DM_Motor_J4310 DM_Motor_Rotary;
     Class_DJI_Motor_C610 DJI_Motor_Clamp;
 
     //夹爪自身控制状态

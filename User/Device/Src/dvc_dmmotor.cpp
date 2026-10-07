@@ -218,6 +218,10 @@ void Class_DM_Motor_J4310::CAN_RxCpltCallback(uint8_t *Rx_Data)
     //滑动窗口, 判断电机是否在线
     this->Flag += 1;
 
+    // 计算从发送命令到收到回信的延迟时间 (秒)
+    uint32_t tmp_cnt = Tx_DWT_CNT;
+    Rx_Delay_Time = DWT_GetDeltaT(&tmp_cnt);
+
     Data_Process();
 }
 
@@ -317,6 +321,9 @@ void Class_DM_Motor_J4310::TIM_Alive_PeriodElapsedCallback()
  */
 void Class_DM_Motor_J4310::TIM_Process_PeriodElapsedCallback()
 {
+    // 记录发送 CAN 帧时的 DWT 时间戳
+    Tx_DWT_CNT = DWT->CYCCNT;
+
     switch (DM_Motor_Control_Method)
     {
     case (DM_Motor_Control_Method_MIT_POSITION):
