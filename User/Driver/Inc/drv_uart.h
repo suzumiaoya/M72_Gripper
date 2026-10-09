@@ -78,6 +78,9 @@ extern float temp_power;
 
 void UART_Init(UART_HandleTypeDef *huart, UART_Call_Back Callback_Function, uint16_t Rx_Buffer_Length);
 
+// 重新启动UART接收，UART5使用双倍逻辑缓冲区长度以匹配DMA缓冲区
+HAL_StatusTypeDef UART_Restart_ReceiveToIdle(UART_HandleTypeDef *huart);
+
 uint8_t UART_Send_Data(UART_HandleTypeDef *huart, uint8_t *Data, uint16_t Length);
 
 void TIM_UART_PeriodElapsedCallback();

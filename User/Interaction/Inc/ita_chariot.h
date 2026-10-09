@@ -15,7 +15,7 @@
 /* Includes ------------------------------------------------------------------*/
 
 #include "dvc_dr16.h"
-#include "dvc_Fs_i6x.h"
+#include "dvc_Fs_i6.h"
 #include "dvc_VT13.h"
 #include "crt_gimbal.h"
 #include "crt_booster.h"
@@ -159,7 +159,7 @@ public:
 #ifdef GIMBAL
     // 遥控器
     Class_DR16 DR16;
-    Class_Fs_i6x FS_I6X;
+    Class_FS_I6 FS_I6;
     Class_VT13 VT13;
     // 上位机
     Class_MiniPC MiniPC;
@@ -219,8 +219,8 @@ public:
     void CAN_Gimbal_Tx_Chassis_Callback();
 
     void TIM_Control_Callback();
-    // FS-i6X 每收到一帧后调用，只控制本工程的云台使能与夹爪目标。
-    void Control_FS_I6X_Gripper();
+    // FS-i6 每收到一帧后调用，只控制本工程的云台使能与夹爪目标。
+    void Control_FS_I6_Gripper();
 
     void TIM1msMod50_Chassis_Communicate_Alive_PeriodElapsedCallback();
 #endif
@@ -274,11 +274,11 @@ protected:
 #ifdef GIMBAL
     // 遥控器拨动的死区, 0~1
     float DR16_Dead_Zone;
-    float FS_I6X_Dead_Zone = 0.05f;
-    // FS-i6X 每帧满量程摇杆对应的Roll目标增量, rad/frame
-    float FS_I6X_Gripper_Roll_Resolution = 0.02f;
-    float FS_I6X_Gripper_Target_Roll_Radian = 0.0f;
-    bool FS_I6X_Gripper_Target_Initialized = false;
+    float FS_I6_Dead_Zone = 0.05f;
+    // FS-i6 每帧满量程摇杆对应的Roll目标增量, rad/frame
+    float FS_I6_Gripper_Roll_Resolution = 0.02f;
+    float FS_I6_Gripper_Target_Roll_Radian = 0.0f;
+    bool FS_I6_Gripper_Target_Initialized = false;
     // 常量
     // 键鼠模式按住shift 最大速度缩放系数
     float DR16_Mouse_Chassis_Shift = 2.0f;

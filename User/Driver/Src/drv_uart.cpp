@@ -54,6 +54,32 @@ static void USART_RxDMA_MultiBufferStart(UART_HandleTypeDef *huart, uint32_t *Sr
 }
 uint8_t Power_receive_data[32];
 float temp_power = 0;
+
+HAL_StatusTypeDef UART_Restart_ReceiveToIdle(UART_HandleTypeDef *huart)
+{
+    if ((huart == nullptr) || (huart->Instance != UART5))
+        return HAL_ERROR;
+
+    // UART5_Manage_Object.Rx_Buffer_Length是协议处理长度，DMA实际缓冲区为其两倍。
+    // 当前FS-i6使用64字节逻辑长度，对应128字节DMA缓冲区。
+    if ((UART5_Manage_Object.Rx_Buffer_Length == 0U) ||
+        (UART5_Manage_Object.Rx_Buffer_Length * 2U > UART_BUFFER_SIZE))
+        return HAL_ERROR;
+
+    const HAL_StatusTypeDef status = HAL_UARTEx_ReceiveToIdle_DMA(
+        huart,
+        UART5_Manage_Object.Rx_Buffer,
+        static_cast<uint16_t>(UART5_Manage_Object.Rx_Buffer_Length * 2U));
+
+    if (status == HAL_OK)
+    {
+        // UART5只使用IDLE/TC事件，关闭半传输中断，避免半缓冲数据被误当作完整协议帧。
+        __HAL_DMA_DISABLE_IT(&hdma_uart5_rx, DMA_IT_HT);
+    }
+
+    return status;
+}
+
 /**
  * @brief 初始化UART
  *
@@ -74,8 +100,7 @@ void UART_Init(UART_HandleTypeDef *huart, UART_Call_Back Callback_Function, uint
         UART5_Manage_Object.UART_Handler = huart;
         UART5_Manage_Object.Callback_Function = Callback_Function;
         UART5_Manage_Object.Rx_Buffer_Length = Rx_Buffer_Length;
-        HAL_UARTEx_ReceiveToIdle_DMA(huart, UART5_Manage_Object.Rx_Buffer, UART5_Manage_Object.Rx_Buffer_Length*2);
-			  __HAL_DMA_DISABLE_IT(&hdma_uart5_rx, DMA_IT_HT);
+        UART_Restart_ReceiveToIdle(huart);
     }
     else if (huart->Instance == UART7)
     {
@@ -155,12 +180,20 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     }
     else if (huart->Instance == UART5)
     {
-			  
-        UART5_Manage_Object.Rx_Length = Size;              
-        if( UART5_Manage_Object.Rx_Length<=UART5_Manage_Object.Rx_Buffer_Length)
-            UART5_Manage_Object.Callback_Function(UART5_Manage_Object.Rx_Buffer, Size);
-				HAL_UARTEx_ReceiveToIdle_DMA(huart, UART5_Manage_Object.Rx_Buffer, UART5_Manage_Object.Rx_Buffer_Length*2);
-				__HAL_DMA_DISABLE_IT(&hdma_uart5_rx, DMA_IT_HT);
+        // HT 不结束 NORMAL DMA，不能重启或重复消费半缓冲。
+        if (HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_HT)
+            return;
+        UART5_Manage_Object.Rx_Length = Size;
+        // DMA 实际启动长度为逻辑长度的两倍，TC 时 Size 可达到 128。
+        // 先快照并重启接收，再解包/控制，缩短 UART 没有 DMA 接收的窗口。
+        uint8_t received_data[UART_BUFFER_SIZE];
+        const bool valid_size = Size > 0U && Size <= UART_BUFFER_SIZE &&
+                                Size <= UART5_Manage_Object.Rx_Buffer_Length * 2U;
+        if (valid_size)
+            memcpy(received_data, UART5_Manage_Object.Rx_Buffer, Size);
+        UART_Restart_ReceiveToIdle(huart);
+        if (valid_size && UART5_Manage_Object.Callback_Function != nullptr)
+            UART5_Manage_Object.Callback_Function(received_data, Size);
 //        else
 //        memset( UART5_Manage_Object.Rx_Buffer, 0, UART5_Manage_Object.Rx_Buffer_Length);
 			  

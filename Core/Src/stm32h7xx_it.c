@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "drv_uart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -562,10 +563,12 @@ void FDCAN3_IT0_IRQHandler(void)
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->Instance == UART5)
+	if ((huart != NULL) && (huart->Instance == UART5))
     {
-
-		}
+        // ORE/FE/NE等错误会使HAL关闭IDLE和DMA接收，必须在错误回调中重新挂起接收。
+        // UART_Restart_ReceiveToIdle()会使用完整的128字节DMA缓冲区并关闭半传输中断。
+        (void)UART_Restart_ReceiveToIdle(huart);
+	}
 }
 
 /* USER CODE END 1 */
