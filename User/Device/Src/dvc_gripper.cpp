@@ -248,6 +248,9 @@ void Class_Gripper::Reload_TIM_Status_PeriodElapsedCallback()
             {
                 // 最大张开位置定义为张合相对角0rad
                 Clamp_Open_Offset_Radian = Now_Clamp_Raw_Radian;
+                // 校准完成后默认保持当前Roll并张开，避免沿用校准前的旧目标
+                Target_Roll_Radian = Gripper_Data.Now_Roll_Radian;
+                Target_Clamp_Radian = 0.0f;
                 // 状态切换当周期先保持当前位置, 下一周期再执行上层最新目标
                 Target_DM_Radian = Now_DM_Radian;
                 Target_DM_Omega = 0.0f;

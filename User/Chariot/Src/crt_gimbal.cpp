@@ -74,7 +74,7 @@ void Class_Gimbal::Output()
  */
 void Class_Gimbal::TIM_Calculate_PeriodElapsedCallback()
 {
-    // Output();
+    Output();
 
     Gripper.TIM_Calculate_PeriodElapsedCallback();
 }

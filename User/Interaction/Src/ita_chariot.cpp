@@ -27,7 +27,7 @@
  * @brief 控制交互端初始化
  *
  */
-void Class_Chariot::Init(float __DR16_Dead_Zone)
+void Class_Chariot::Init(float __Remote_Dead_Zone)
 {
 #ifdef CHASSIS
 
@@ -57,9 +57,12 @@ void Class_Chariot::Init(float __DR16_Dead_Zone)
     FSM_Alive_Control.Init(5, 0);
 
 // 遥控器
-#ifdef USE_DR16
+#ifdef USE_FS_I6X
+    FS_I6X.Init(&huart5);
+    FS_I6X_Dead_Zone = __Remote_Dead_Zone;
+#elif defined(USE_DR16)
     DR16.Init(&huart5, &huart1);
-    DR16_Dead_Zone = __DR16_Dead_Zone;
+    DR16_Dead_Zone = __Remote_Dead_Zone;
 #endif
 
 #ifdef IMAGE_VT13
@@ -457,6 +460,57 @@ void Class_Chariot::Transform_Mouse_Axis()
  *
  */
 #ifdef GIMBAL
+void Class_Chariot::Control_FS_I6X_Gripper()
+{
+#ifdef USE_FS_I6X
+    // SWA 只有下拨档允许云台/夹爪上电，其余位置均按安全失能处理。
+    if ((FS_I6X.Get_FS_Status() != FS_Status_ENABLE) ||
+        (FS_I6X.Get_SWA() != FS_Switch_Status_DOWN))
+    {
+        Gimbal.Set_Gimbal_Control_Type(Gimbal_Control_Type_DISABLE);
+        FS_I6X_Gripper_Target_Initialized = false;
+        return;
+    }
+
+    Gimbal.Set_Gimbal_Control_Type(Gimbal_Control_Type_NORMAL);
+
+    // 校准完成前只允许状态机寻找张开限位，不接受运动目标。
+    if (Gimbal.Gripper.Get_Gripper_Cali_Status() != Gripper_Cali_Status_CALIBRATED)
+    {
+        FS_I6X_Gripper_Target_Initialized = false;
+        Gimbal.Gripper.Set_Target_Clamp_Radian(0.0f);
+        return;
+    }
+
+    // 首次进入正常控制时从当前位置接管，避免目标角突跳。
+    if (!FS_I6X_Gripper_Target_Initialized)
+    {
+        FS_I6X_Gripper_Target_Roll_Radian = Gimbal.Gripper.Get_Now_Roll_Radian();
+        FS_I6X_Gripper_Target_Initialized = true;
+    }
+
+    float right_x = FS_I6X.Get_Right_X();
+    if (Math_Abs(right_x) <= FS_I6X_Dead_Zone)
+    {
+        right_x = 0.0f;
+    }
+
+    FS_I6X_Gripper_Target_Roll_Radian = Normalize_Angle_Radian_PI_to_PI(
+        FS_I6X_Gripper_Target_Roll_Radian + right_x * FS_I6X_Gripper_Roll_Resolution);
+    Gimbal.Gripper.Set_Target_Roll_Radian(FS_I6X_Gripper_Target_Roll_Radian);
+
+    // SWD 上拨张开；下拨闭合。中位/异常值按张开处理。
+    if (FS_I6X.Get_SWD() == FS_Switch_Status_DOWN)
+    {
+        Gimbal.Gripper.Set_Target_Clamp_Radian(GRIPPER_CLAMP_MAX_RADIAN);
+    }
+    else
+    {
+        Gimbal.Gripper.Set_Target_Clamp_Radian(0.0f);
+    }
+#endif
+}
+
 void Class_Chariot::Control_Gimbal()
 {
     // 角度目标值
@@ -1171,14 +1225,28 @@ void Class_Chariot::TIM1msMod50_Alive_PeriodElapsedCallback()
         }
 #elif defined(GIMBAL)
 
+        #ifdef USE_FS_I6X
+        FS_I6X.TIM1msMod50_Alive_PeriodElapsedCallback();
+        #endif
+
         if (mod50_mod3 % 3 == 0)
         {
             // 判断底盘通讯在线状态
             TIM1msMod50_Chassis_Communicate_Alive_PeriodElapsedCallback();
+            #ifdef USE_DR16
             DR16.TIM1msMod50_Alive_PeriodElapsedCallback();
+            #endif
             mod50_mod3 = 0;
         }
-#ifdef defined(USE_DR16)
+#ifdef USE_FS_I6X
+        if (FS_I6X.Get_FS_Status() == FS_Status_DISABLE)
+        {
+            Gimbal.Set_Gimbal_Control_Type(Gimbal_Control_Type_DISABLE);
+            FS_I6X_Gripper_Target_Initialized = false;
+            Booster.Set_Booster_Control_Type(Booster_Control_Type_DISABLE);
+            Chassis.Set_Chassis_Control_Type(Chassis_Control_Type_DISABLE);
+        }
+#elif defined(USE_DR16)
 #ifdef DEBUG
         if (DR16.Get_DR16_Status() == DR16_Status_DISABLE)
         {
@@ -1242,7 +1310,15 @@ void Class_Chariot::TIM_Unline_Protect_PeriodElapsedCallback()
 {
 // 云台离线保护
 #ifdef GIMBAL
-#ifdef defined(USE_DR16)
+#ifdef USE_FS_I6X
+    if (FS_I6X.Get_FS_Status() == FS_Status_DISABLE)
+    {
+        Gimbal.Set_Gimbal_Control_Type(Gimbal_Control_Type_DISABLE);
+        FS_I6X_Gripper_Target_Initialized = false;
+        Booster.Set_Booster_Control_Type(Booster_Control_Type_DISABLE);
+        Chassis.Set_Chassis_Control_Type(Chassis_Control_Type_DISABLE);
+    }
+#elif defined(USE_DR16)
 #ifdef DEBUG
     if (DR16.Get_DR16_Status() == DR16_Status_DISABLE)
     {

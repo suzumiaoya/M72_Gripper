@@ -285,12 +285,22 @@ void Device_SPI2_Callback(uint8_t *Tx_Buffer, uint8_t *Rx_Buffer, uint16_t Lengt
  * @param Length 长度
  */
 #ifdef GIMBAL
+#ifdef USE_FS_I6X
+void FS_I6X_UART5_Callback(uint8_t *Buffer, uint16_t Length)
+{
+    const bool valid_frame = chariot.FS_I6X.FS_UART_RxCpltCallback(Buffer, Length);
+    if (valid_frame || (chariot.FS_I6X.Get_FS_Status() == FS_Status_DISABLE))
+    {
+        chariot.Control_FS_I6X_Gripper();
+    }
+}
+#elif defined(USE_DR16)
 void DR16_UART5_Callback(uint8_t *Buffer, uint16_t Length)
 {
     chariot.DR16.DR16_UART_RxCpltCallback(Buffer);
-    // 底盘 云台 发射机构 的控制策略
     chariot.TIM_Control_Callback();
 }
+#endif
 #endif
 /**
  * @brief UART9遥控器回调函数
@@ -304,11 +314,13 @@ void VT13_UART_Callback(uint8_t *Buffer, uint16_t Length)
     // 该图传链路的回调函数并未添加自定义控制器的协议
     chariot.VT13.VT13_UART_RxCpltCallback(Buffer);
 
+#ifndef USE_FS_I6X
     // 底盘 云台 发射机构 的控制策略
     if (*(Buffer + 0) == 0xA9 && *(Buffer + 1) == 0x53)
     {
         chariot.TIM_Control_Callback();
     }
+#endif
 }
 #endif
 
@@ -395,8 +407,12 @@ void Task1ms_TIM5_Callback()
     if (start_flag == 1)
     {
 #ifdef GIMBAL
+        #ifdef USE_DR16
         chariot.FSM_Alive_Control.Reload_TIM_Status_PeriodElapsedCallback();
+        #endif
+        #if defined(IMAGE_VT13) && !defined(USE_FS_I6X)
         chariot.FSM_Alive_Control_VT13.Reload_TIM_Status_PeriodElapsedCallback();
+        #endif
 #endif
         chariot.TIM_Calculate_PeriodElapsedCallback();
 
@@ -464,7 +480,9 @@ extern "C" void Task_Init()
     SPI_Init(&hspi2, Device_SPI2_Callback);
 
 // 遥控器接收
-#ifdef USE_DR16
+#ifdef USE_FS_I6X
+    UART_Init(&huart5, FS_I6X_UART5_Callback, FS_I6X_FRAME_LENGTH);
+#elif defined(USE_DR16)
     UART_Init(&huart5, DR16_UART5_Callback, 18);
 #endif // DR16
 #ifdef IMAGE_VT13
