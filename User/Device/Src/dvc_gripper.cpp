@@ -16,7 +16,7 @@
 /* Private macros ------------------------------------------------------------*/
 
 // 达妙电机转角到M2006跟随转角的实测比例
-#define GRIPPER_DM_FOLLOW_RATIO 1.05f
+#define GRIPPER_DM_FOLLOW_RATIO 1.0f
 // 外限位校准角速度, rad/s
 #define GRIPPER_CALI_OMEGA (-3.0f)
 // 外限位堵转相对角速度阈值, rad/s
@@ -28,10 +28,10 @@
 // 外限位搜索超时时间, ms
 #define GRIPPER_CALI_TIMEOUT 4000
 // M2006角速度环参数及输出限幅
-#define GRIPPER_DJI_OMEGA_KP 1000.0f
+#define GRIPPER_DJI_OMEGA_KP 1200.0f
 #define GRIPPER_DJI_OUTPUT_MAX 9000.0f
 // 夹爪张合位置外环参数及M2006目标角速度限幅
-#define GRIPPER_CLAMP_POSITION_KP 10.0f
+#define GRIPPER_CLAMP_POSITION_KP 11.0f
 #define GRIPPER_DJI_OMEGA_MAX 20.0f
 // 堵转阈值只由校准目标速度计算, 不使用带噪声的实时反馈速度
 #define GRIPPER_CALI_CURRENT_RATIO 0.9f
