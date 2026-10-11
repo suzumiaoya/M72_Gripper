@@ -131,6 +131,7 @@ private:
     // 夹爪张合位置外环, 输出M2006主动开合修正速度
     Class_PID PID_Clamp;
 
+    // 对外的夹爪运动学数据结构体
     Struct_Gripper_Data Gripper_Data = {};
 
     // 上电校准状态机相关变量
@@ -147,18 +148,22 @@ private:
     float DM_Mod_Radian = 0.0f;
     float Pre_DM_Mod_Radian = 0.0f;
     float Now_DM_Radian = 0.0f;
-    // M2006底层反馈角度
+    // M2006角度
     float Now_DJI_Radian = 0.0f;
-    // 内部连续Roll角度, 用于运动学及Ozone调试
+    // 内部连续Roll总角度
     float Now_Roll_Total_Radian = 0.0f;
-    // 尚未扣除外限位偏移的张合相对角
+    // 不考虑外限位offset的张合相对角
     float Now_Clamp_Raw_Radian = 0.0f;
 
+    
     void Output();
-    void Set_Cali_Status(Enum_Gripper_Cali_Status __Gripper_Cali_Status);
-    void Reset_DM_Multi_Turn_Radian();
     // 夹爪运动学正逆解算，将目标Roll和张合相对角逆解算为两个电机的运动；读取电机返回数据正解算为夹爪Roll和张合运动
     void Calculate_Kinematics();
+
+    // 达妙电机数据处理函数
+    void DM_Motor_Angle_Transform();
+    // 重置达妙多圈角度
+    void Reset_DM_Multi_Turn_Radian();
 };
 
 /* Exported variables --------------------------------------------------------*/
