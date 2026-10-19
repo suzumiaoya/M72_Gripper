@@ -474,11 +474,21 @@ void Class_Chariot::Control_FS_I6_Gripper()
 
     Gimbal.Set_Gimbal_Control_Type(Gimbal_Control_Type_NORMAL);
 
-    // 校准完成前只允许状态机寻找张开限位，不接受运动目标。
-    if (Gimbal.Gripper.Get_Gripper_Cali_Status() != Gripper_Cali_Status_CALIBRATED)
+    // SWD上拨张开；下拨闭合。中位/异常值按张开处理。
+    if (FS_I6.Get_SWD() == FS_I6_Switch_Status_DOWN)
+    {
+        Gimbal.Gripper.Set_Gripper_Clamp_Command(Gripper_Clamp_Command_CLOSE);
+    }
+    else
+    {
+        Gimbal.Gripper.Set_Gripper_Clamp_Command(Gripper_Clamp_Command_OPEN);
+    }
+
+    Enum_Gripper_Clamp_Status gripper_clamp_status = Gimbal.Gripper.Get_Gripper_Clamp_Status();
+    if ((gripper_clamp_status != Gripper_Clamp_Status_OPENED) &&
+        (gripper_clamp_status != Gripper_Clamp_Status_GRIPPED))
     {
         FS_I6_Gripper_Target_Initialized = false;
-        Gimbal.Gripper.Set_Target_Clamp_Radian(0.0f);
         return;
     }
 
@@ -499,15 +509,6 @@ void Class_Chariot::Control_FS_I6_Gripper()
         FS_I6_Gripper_Target_Roll_Radian + right_x * FS_I6_Gripper_Roll_Resolution);
     Gimbal.Gripper.Set_Target_Roll_Radian(FS_I6_Gripper_Target_Roll_Radian);
 
-    // SWD 上拨张开；下拨闭合。中位/异常值按张开处理。
-    if (FS_I6.Get_SWD() == FS_I6_Switch_Status_DOWN)
-    {
-        Gimbal.Gripper.Set_Target_Clamp_Radian(GRIPPER_CLAMP_MAX_RADIAN);
-    }
-    else
-    {
-        Gimbal.Gripper.Set_Target_Clamp_Radian(0.0f);
-    }
 #endif
 }
 

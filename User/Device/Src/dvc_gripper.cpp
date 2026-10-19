@@ -1,48 +1,45 @@
 /**
  * @file dvc_gripper.cpp
  * @author hsl by suzumiaoya
- * @brief 夹爪类驱动
- * @version 0.1
- * @date 2026-09-29 0.1 测试版
+ * @brief 旋转夹爪类驱动
+ * @version 0.2
+ * @date 2026-10-19
  *
  * @copyright ZLLC 2027
- *
  */
-
-/* Includes ------------------------------------------------------------------*/
 
 #include "dvc_gripper.h"
 
-/* Private macros ------------------------------------------------------------*/
-
-// 达妙电机转角到M2006跟随转角的实测比例
-#define GRIPPER_DM_FOLLOW_RATIO 1.0f
-// 外限位校准角速度, rad/s
-#define GRIPPER_CALI_OMEGA (-3.0f)
-// 外限位堵转相对角速度阈值, rad/s
-#define GRIPPER_CALI_STALL_OMEGA 0.05f
-// 外限位堵转确认时间, ms
-#define GRIPPER_CALI_STALL_TIME 100
-// 达妙电机使能等待时间, ms
-#define GRIPPER_DM_ENABLE_WAIT_TIME 100
-// 外限位搜索超时时间, ms
-#define GRIPPER_CALI_TIMEOUT 4000
-// M2006角速度环参数及输出限幅
-#define GRIPPER_DJI_OMEGA_KP 1200.0f
-#define GRIPPER_DJI_OUTPUT_MAX 9000.0f
-// 夹爪张合位置外环参数及M2006目标角速度限幅
-#define GRIPPER_CLAMP_POSITION_KP 11.0f
-#define GRIPPER_DJI_OMEGA_MAX 20.0f
-// 堵转阈值只由校准目标速度计算, 不使用带噪声的实时反馈速度
-#define GRIPPER_CALI_CURRENT_RATIO 0.9f
-#define GRIPPER_CALI_CURRENT_CALCULATED (GRIPPER_CALI_CURRENT_RATIO * GRIPPER_DJI_OMEGA_KP * (-GRIPPER_CALI_OMEGA))
-#define GRIPPER_CALI_CURRENT_THRESHOLD ((GRIPPER_CALI_CURRENT_CALCULATED < GRIPPER_DJI_OUTPUT_MAX) ? GRIPPER_CALI_CURRENT_CALCULATED : GRIPPER_DJI_OUTPUT_MAX)
-
-/* Private types -------------------------------------------------------------*/
-
 /* Private variables ---------------------------------------------------------*/
 
-/* Private function declarations ---------------------------------------------*/
+// 17:34外啮合传动, DM转角到Roll转角的幅值比例
+const float GRIPPER_DM_TO_ROLL_RATIO = 17.0f / 34.0f;
+
+// M2006速度环参数及总输出限幅
+const float GRIPPER_DJI_OMEGA_KP = 1000.0f;
+const float GRIPPER_DJI_OUTPUT_MAX = 9000.0f;
+
+// 主动张合相对角速度, rad/s
+const float GRIPPER_OPEN_OMEGA = -3.0f;
+const float GRIPPER_CLOSE_OMEGA = 4.0f;
+
+// 夹持与外限位保持电流映射值
+const float GRIPPER_CLAMP_CURRENT = 4500.0f;
+const float GRIPPER_OPEN_HOLD_CURRENT = -1000.0f;
+
+// 接触与夹紧判定参数
+const float GRIPPER_STALL_OMEGA = 0.1f;
+const float GRIPPER_STALL_CURRENT_RATIO = 0.9f;
+const float GRIPPER_OPEN_STALL_CURRENT = GRIPPER_STALL_CURRENT_RATIO * GRIPPER_DJI_OMEGA_KP * GRIPPER_OPEN_OMEGA;
+const float GRIPPER_CLOSE_STALL_CURRENT = GRIPPER_STALL_CURRENT_RATIO * GRIPPER_DJI_OMEGA_KP * GRIPPER_CLOSE_OMEGA;
+const float GRIPPER_GRIPPED_CURRENT = GRIPPER_STALL_CURRENT_RATIO * GRIPPER_CLAMP_CURRENT;
+const uint16_t GRIPPER_CONTACT_IGNORE_TIME = 50;
+const uint16_t GRIPPER_CONTACT_CONFIRM_TIME = 20;
+const uint16_t GRIPPER_CONTACT_CURRENT_RAMP_TIME = 30;
+
+// 主动张合超时及停止时间, ms
+const uint16_t GRIPPER_MOTION_TIMEOUT = 4000;
+const uint16_t GRIPPER_MOTION_STOP_TIME = 1000;
 
 /* Function prototypes -------------------------------------------------------*/
 
@@ -58,7 +55,6 @@ void Class_DM_Motor_J4310_PID::TIM_PID_PeriodElapsedCallback()
     {
     case (DM_Motor_Control_Method_PID_OPENLOOP):
     {
-        // 开环模式不需要PID控制，直接把Target_Torque输出到电机，在切换到开环模式时清除其他PID类中的积分项
         PID_Omega.Set_Integral_Error(0.0f);
         PID_Position.Set_Integral_Error(0.0f);
     }
@@ -69,7 +65,6 @@ void Class_DM_Motor_J4310_PID::TIM_PID_PeriodElapsedCallback()
         PID_Omega.Set_Target(Get_Target_Omega());
         PID_Omega.Set_Now(Get_Now_Omega());
         PID_Omega.TIM_Adjust_PeriodElapsedCallback();
-
         Set_Target_Torque(PID_Omega.Get_Out());
     }
     break;
@@ -78,14 +73,11 @@ void Class_DM_Motor_J4310_PID::TIM_PID_PeriodElapsedCallback()
     {
         PID_Position.Set_Target(Get_Target_Angle());
         PID_Position.Set_Now(Get_Now_Angle());
-        // 根据 Target_Omega 为位置环设置最大限幅，即最大旋转转速
-        // PID_Position.Set_Out_Max(Math_Abs(Get_Target_Omega()));
         PID_Position.TIM_Adjust_PeriodElapsedCallback();
 
         PID_Omega.Set_Target(PID_Position.Get_Out());
         PID_Omega.Set_Now(Get_Now_Omega());
         PID_Omega.TIM_Adjust_PeriodElapsedCallback();
-
         Set_Target_Torque(PID_Omega.Get_Out());
     }
     break;
@@ -99,195 +91,304 @@ void Class_DM_Motor_J4310_PID::TIM_PID_PeriodElapsedCallback()
 
 void Class_Gripper::Init()
 {
-    // 成员电机初始化
     DM_Motor_Rotary.Init(&hfdcan2, DM_Motor_ID_0xA6, DM_Motor_Control_Method_POSITION_OMEGA, 0, 50.0f, 5.0f);
-    DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_OPENLOOP, 36.0f, 10000.0f);
-    // DM_Motor_Rotary.Set_Target_Torque(0.0f);
+    // Torque_Max与Output_Max均为10000, TORQUE模式下目标值与电流映射值一一对应
+    DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_TORQUE, 36.0f, 10000.0f);
     DJI_Motor_Clamp.Set_Out(0.0f);
 
-    // 电机控制参数初始化
     DJI_Motor_Clamp.PID_Omega.Init(GRIPPER_DJI_OMEGA_KP, 0.0f, 0.0f, 0.0f, 0.0f, GRIPPER_DJI_OUTPUT_MAX);
-    PID_Clamp.Init(GRIPPER_CLAMP_POSITION_KP, 0.0f, 0.0f, 0.0f, 0.0f, GRIPPER_DJI_OMEGA_MAX);
-    // DM_Motor_Rotary.PID_Omega.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
-    // DM_Motor_Rotary.PID_Position.Init(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f);
-
-    // 父类状态机类初始化
-    Class_FSM::Init(Gripper_Cali_Status_NUM, Gripper_Cali_Status_UNCALIBRATED);
+    Class_FSM::Init(Gripper_Clamp_Status_NUM, Gripper_Clamp_Status_DISABLED);
 }
 
 void Class_Gripper::Output()
 {
-    // 所有阶段的电机模式和目标均由此函数单点写入, 状态机只负责状态转移和校准判定
-    if ((Gripper_Control_Type == Gripper_Control_Type_ENABLE) &&
-        (Gripper_Cali_Status == Gripper_Cali_Status_CALIBRATING))
-    {
-        // 校准状态下保持Roll不变, 等待达妙电机使能后控制M2006向外限位运动
-        DM_Motor_Rotary.Set_DM_Control_Status(DM_Motor_Control_Status_ENABLE);
-        DM_Motor_Rotary.Set_DM_Motor_Control_Method(DM_Motor_Control_Method_POSITION_OMEGA);
-        DM_Motor_Rotary.Set_Target_Angle(Cali_Hold_DM_Radian);
-        DM_Motor_Rotary.Set_Target_Omega(0.0f);
-
-        if (Status[Now_Status_Serial].Time > GRIPPER_DM_ENABLE_WAIT_TIME)
-        {
-            DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OMEGA);
-            DJI_Motor_Clamp.Set_Target_Omega_Radian(GRIPPER_CALI_OMEGA);
-        }
-        else
-        {
-            DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OPENLOOP);
-            DJI_Motor_Clamp.Set_Target_Torque(0.0f);
-            DJI_Motor_Clamp.Set_Out(0.0f);
-        }
-    }
-    else if ((Gripper_Control_Type == Gripper_Control_Type_ENABLE) &&
-             (Gripper_Cali_Status == Gripper_Cali_Status_CALIBRATED))
-    {
-        // 正常控制状态
-        DM_Motor_Rotary.Set_DM_Control_Status(DM_Motor_Control_Status_ENABLE);
-        DM_Motor_Rotary.Set_DM_Motor_Control_Method(DM_Motor_Control_Method_POSITION_OMEGA);
-        DM_Motor_Rotary.Set_Target_Angle(Target_DM_Radian);
-        DM_Motor_Rotary.Set_Target_Omega(Target_DM_Omega);
-
-        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OMEGA);
-        DJI_Motor_Clamp.Set_Target_Omega_Radian(Target_DJI_Omega_Radian);
-    }
-    else // 失能、未校准、校准失败或电机离线时安全停机
+    bool DM_Online = (DM_Motor_Rotary.Get_DM_Motor_Status() == DM_Motor_Status_ENABLE);
+    bool DJI_Online = (DJI_Motor_Clamp.Get_DJI_Motor_Status() == DJI_Motor_Status_ENABLE);
+    if ((Gripper_Control_Type != Gripper_Control_Type_ENABLE) ||
+        (Gripper_Clamp_Status == Gripper_Clamp_Status_DISABLED) ||
+        !DM_Online || !DJI_Online || !DM_Radian_Initialized)
     {
         DM_Motor_Rotary.Set_DM_Control_Status(DM_Motor_Control_Status_DISABLE);
         DM_Motor_Rotary.Set_Target_Omega(0.0f);
 
-        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OPENLOOP);
+        Clamp_Current = 0.0f;
+        Follow_Omega_Current = 0.0f;
+        Target_DJI_Output = 0.0f;
+        Target_DJI_Omega_Radian = 0.0f;
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_TORQUE);
         DJI_Motor_Clamp.Set_Target_Torque(0.0f);
-        DJI_Motor_Clamp.Set_Out(0.0f);
+        return;
+    }
+
+    DM_Motor_Rotary.Set_DM_Control_Status(DM_Motor_Control_Status_ENABLE);
+    DM_Motor_Rotary.Set_DM_Motor_Control_Method(DM_Motor_Control_Method_POSITION_OMEGA);
+
+    if ((Gripper_Clamp_Status == Gripper_Clamp_Status_OPENED) ||
+        (Gripper_Clamp_Status == Gripper_Clamp_Status_GRIPPED))
+    {
+        DM_Motor_Rotary.Set_Target_Angle(Target_DM_Radian);
+        DM_Motor_Rotary.Set_Target_Omega(Target_DM_Omega);
+    }
+    else
+    {
+        DM_Motor_Rotary.Set_Target_Angle(Clamp_Hold_DM_Radian);
+        DM_Motor_Rotary.Set_Target_Omega(0.0f);
+    }
+
+    Follow_Omega_Current = 0.0f;
+    switch (Gripper_Clamp_Status)
+    {
+    case (Gripper_Clamp_Status_OPENING):
+    case (Gripper_Clamp_Status_CLOSING):
+    {
+        float Motion_Omega = (Gripper_Clamp_Status == Gripper_Clamp_Status_OPENING) ? GRIPPER_OPEN_OMEGA : GRIPPER_CLOSE_OMEGA;
+        if (Status[Now_Status_Serial].Time >= GRIPPER_MOTION_TIMEOUT)
+        {
+            float Stop_Ratio = 1.0f - (float)(Status[Now_Status_Serial].Time - GRIPPER_MOTION_TIMEOUT) / (float)GRIPPER_MOTION_STOP_TIME;
+            Math_Constrain(&Stop_Ratio, 0.0f, 1.0f);
+            Motion_Omega *= Stop_Ratio;
+        }
+
+        Clamp_Current = 0.0f;
+        Target_DJI_Output = 0.0f;
+        Target_DJI_Omega_Radian = Motion_Omega - GRIPPER_DM_TO_ROLL_RATIO * DM_Motor_Rotary.Get_Now_Omega();
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OMEGA);
+        DJI_Motor_Clamp.Set_Target_Omega_Radian(Target_DJI_Omega_Radian);
+    }
+    break;
+
+    case (Gripper_Clamp_Status_CONTACT):
+    {
+        Target_DJI_Omega_Radian = 0.0f;
+        Target_DJI_Output = Clamp_Current;
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_TORQUE);
+        DJI_Motor_Clamp.Set_Target_Torque(Target_DJI_Output);
+    }
+    break;
+
+    case (Gripper_Clamp_Status_GRIPPED):
+    {
+        Clamp_Current = GRIPPER_CLAMP_CURRENT;
+        Target_DJI_Omega_Radian = -GRIPPER_DM_TO_ROLL_RATIO * DM_Motor_Rotary.Get_Now_Omega();
+        DJI_Motor_Clamp.PID_Omega.Set_Target(Target_DJI_Omega_Radian);
+        DJI_Motor_Clamp.PID_Omega.Set_Now(DJI_Motor_Clamp.Get_Now_Omega_Radian());
+        DJI_Motor_Clamp.PID_Omega.TIM_Adjust_PeriodElapsedCallback();
+        Follow_Omega_Current = DJI_Motor_Clamp.PID_Omega.Get_Out();
+        Target_DJI_Output = Clamp_Current + Follow_Omega_Current;
+        Math_Constrain(&Target_DJI_Output, 0.0f, GRIPPER_DJI_OUTPUT_MAX);
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_TORQUE);
+        DJI_Motor_Clamp.Set_Target_Torque(Target_DJI_Output);
+    }
+    break;
+
+    case (Gripper_Clamp_Status_OPENED):
+    {
+        Clamp_Current = GRIPPER_OPEN_HOLD_CURRENT;
+        Target_DJI_Omega_Radian = 0.0f;
+        Target_DJI_Output = Clamp_Current;
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_TORQUE);
+        DJI_Motor_Clamp.Set_Target_Torque(Target_DJI_Output);
+    }
+    break;
+
+    case (Gripper_Clamp_Status_TIMEOUT):
+    default:
+    {
+        Clamp_Current = 0.0f;
+        Target_DJI_Omega_Radian = 0.0f;
+        Target_DJI_Output = 0.0f;
+        DJI_Motor_Clamp.Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_TORQUE);
+        DJI_Motor_Clamp.Set_Target_Torque(0.0f);
+    }
+    break;
     }
 }
 
-// 定时器回调解算函数
 void Class_Gripper::TIM_Calculate_PeriodElapsedCallback()
 {
-    // 运动学解算
     Calculate_Kinematics();
-
-    // 上电、掉线恢复及外限位校准状态机
     Reload_TIM_Status_PeriodElapsedCallback();
-
-    // 输出目标到成员电机
     Output();
 
-    // 电机PID计算回调函数
     DJI_Motor_Clamp.TIM_PID_PeriodElapsedCallback();
-    // 达妙电机输出回调函数
+    if ((Gripper_Clamp_Status == Gripper_Clamp_Status_OPENING) ||
+        (Gripper_Clamp_Status == Gripper_Clamp_Status_CLOSING))
+    {
+        Target_DJI_Output = DJI_Motor_Clamp.Get_Out();
+    }
+    Now_DJI_Output = DJI_Motor_Clamp.Get_Out();
     DM_Motor_Rotary.TIM_Process_PeriodElapsedCallback();
 }
 
-// 上电以及校准状态机
 void Class_Gripper::Reload_TIM_Status_PeriodElapsedCallback()
 {
     Status[Now_Status_Serial].Time++;
 
     bool DM_Online = (DM_Motor_Rotary.Get_DM_Motor_Status() == DM_Motor_Status_ENABLE);
     bool DJI_Online = (DJI_Motor_Clamp.Get_DJI_Motor_Status() == DJI_Motor_Status_ENABLE);
-
-    // 任一成员电机离线后校准失效并停止控制
     if (!DM_Online || !DJI_Online)
     {
-        Cali_Stall_Count = 0;
-
-        // M2006单独离线时DM仍保有内部多圈位置, 软件必须继续保留同一累计坐标。
-        // 两台电机共同离线视为电机电源掉电, DM内部圈数将清零, 软件多圈角也需重新锚定。
+        Contact_Confirm_Count = 0;
         if (!DM_Online && !DJI_Online)
         {
             Reset_DM_Multi_Turn_Radian();
         }
-
-        if (Gripper_Cali_Status != Gripper_Cali_Status_UNCALIBRATED)
+        if (Gripper_Clamp_Status != Gripper_Clamp_Status_DISABLED)
         {
-            Set_Cali_Status(Gripper_Cali_Status_UNCALIBRATED);
+            Set_Clamp_Status(Gripper_Clamp_Status_DISABLED);
         }
         return;
     }
 
-    switch (Gripper_Cali_Status)
+    if (Gripper_Control_Type == Gripper_Control_Type_DISABLE)
     {
-    case (Gripper_Cali_Status_UNCALIBRATED):
-    {
-        // 两电机在线且上层使能后开始外限位校准
-        if ((Gripper_Control_Type == Gripper_Control_Type_ENABLE) && DM_Radian_Initialized)
+        Contact_Confirm_Count = 0;
+        DJI_Motor_Clamp.PID_Omega.Set_Integral_Error(0.0f);
+        if (Gripper_Clamp_Status != Gripper_Clamp_Status_DISABLED)
         {
-            Cali_Hold_DM_Radian = Now_DM_Radian;
-            Cali_Stall_Count = 0;
-            Set_Cali_Status(Gripper_Cali_Status_CALIBRATING);
+            Set_Clamp_Status(Gripper_Clamp_Status_DISABLED);
+        }
+        return;
+    }
+
+    if (!DM_Radian_Initialized)
+    {
+        return;
+    }
+
+    switch (Gripper_Clamp_Status)
+    {
+    case (Gripper_Clamp_Status_DISABLED):
+    {
+        Start_Clamp_Motion(Gripper_Clamp_Command);
+    }
+    break;
+
+    case (Gripper_Clamp_Status_OPENING):
+    {
+        if (Gripper_Clamp_Command == Gripper_Clamp_Command_CLOSE)
+        {
+            Start_Clamp_Motion(Gripper_Clamp_Command_CLOSE);
+            break;
+        }
+        if (Status[Now_Status_Serial].Time >= (GRIPPER_MOTION_TIMEOUT + GRIPPER_MOTION_STOP_TIME))
+        {
+            Timeout_Clamp_Command = Gripper_Clamp_Command;
+            Set_Clamp_Status(Gripper_Clamp_Status_TIMEOUT);
+            break;
+        }
+        if ((Status[Now_Status_Serial].Time >= GRIPPER_CONTACT_IGNORE_TIME) &&
+            (Status[Now_Status_Serial].Time < GRIPPER_MOTION_TIMEOUT) &&
+            (Math_Abs(Gripper_Data.Now_Clamp_Omega_Radian) < GRIPPER_STALL_OMEGA) &&
+            (DJI_Motor_Clamp.Get_Now_Torque() <= GRIPPER_OPEN_STALL_CURRENT))
+        {
+            Contact_Confirm_Count++;
+        }
+        else
+        {
+            Contact_Confirm_Count = 0;
+        }
+        if (Contact_Confirm_Count >= GRIPPER_CONTACT_CONFIRM_TIME)
+        {
+            Enter_Roll_Enabled_Status(Gripper_Clamp_Status_OPENED);
         }
     }
     break;
 
-    case (Gripper_Cali_Status_CALIBRATING):
+    case (Gripper_Clamp_Status_OPENED):
     {
-        // 校准过程中失能则中止, 下次使能重新开始
-        if (Gripper_Control_Type == Gripper_Control_Type_DISABLE)
+        if (Gripper_Clamp_Command == Gripper_Clamp_Command_CLOSE)
         {
-            Cali_Stall_Count = 0;
-            Set_Cali_Status(Gripper_Cali_Status_UNCALIBRATED);
+            Start_Clamp_Motion(Gripper_Clamp_Command_CLOSE);
+        }
+    }
+    break;
+
+    case (Gripper_Clamp_Status_CLOSING):
+    {
+        if (Gripper_Clamp_Command == Gripper_Clamp_Command_OPEN)
+        {
+            Start_Clamp_Motion(Gripper_Clamp_Command_OPEN);
+            break;
+        }
+        if (Status[Now_Status_Serial].Time >= (GRIPPER_MOTION_TIMEOUT + GRIPPER_MOTION_STOP_TIME))
+        {
+            Timeout_Clamp_Command = Gripper_Clamp_Command;
+            Set_Clamp_Status(Gripper_Clamp_Status_TIMEOUT);
+            break;
+        }
+        if ((Status[Now_Status_Serial].Time >= GRIPPER_CONTACT_IGNORE_TIME) &&
+            (Status[Now_Status_Serial].Time < GRIPPER_MOTION_TIMEOUT) &&
+            (Math_Abs(Gripper_Data.Now_Clamp_Omega_Radian) < GRIPPER_STALL_OMEGA) &&
+            (DJI_Motor_Clamp.Get_Now_Torque() >= GRIPPER_CLOSE_STALL_CURRENT))
+        {
+            Contact_Confirm_Count++;
+        }
+        else
+        {
+            Contact_Confirm_Count = 0;
+        }
+        if (Contact_Confirm_Count >= GRIPPER_CONTACT_CONFIRM_TIME)
+        {
+            Contact_Start_Current = DJI_Motor_Clamp.Get_Out();
+            Math_Constrain(&Contact_Start_Current, 0.0f, GRIPPER_CLAMP_CURRENT);
+            Clamp_Current = Contact_Start_Current;
+            Contact_Confirm_Count = 0;
+            Set_Clamp_Status(Gripper_Clamp_Status_CONTACT);
+        }
+    }
+    break;
+
+    case (Gripper_Clamp_Status_CONTACT):
+    {
+        if (Gripper_Clamp_Command == Gripper_Clamp_Command_OPEN)
+        {
+            Start_Clamp_Motion(Gripper_Clamp_Command_OPEN);
             break;
         }
 
-        // 达妙电机完成使能等待后才开始进行堵转检测与校准超时计时
-        if (Status[Now_Status_Serial].Time > GRIPPER_DM_ENABLE_WAIT_TIME)
-        {
-            if ((Math_Abs(DJI_Motor_Clamp.Get_Now_Omega_Radian()) < GRIPPER_CALI_STALL_OMEGA) &&
-                (Math_Abs(DJI_Motor_Clamp.Get_Now_Torque()) >= GRIPPER_CALI_CURRENT_THRESHOLD))
-            {
-                Cali_Stall_Count++;
-            }
-            else
-            {
-                Cali_Stall_Count = 0;
-            }
+        float Ramp_Ratio = (float)Status[Now_Status_Serial].Time / (float)GRIPPER_CONTACT_CURRENT_RAMP_TIME;
+        Math_Constrain(&Ramp_Ratio, 0.0f, 1.0f);
+        Clamp_Current = Contact_Start_Current + (GRIPPER_CLAMP_CURRENT - Contact_Start_Current) * Ramp_Ratio;
 
-            if (Cali_Stall_Count >= GRIPPER_CALI_STALL_TIME)
-            {
-                // 最大张开位置定义为张合相对角0rad
-                Clamp_Open_Offset_Radian = Now_Clamp_Raw_Radian;
-                // 校准完成后默认保持当前Roll并张开，避免沿用校准前的旧目标
-                Target_Roll_Radian = Gripper_Data.Now_Roll_Radian;
-                Target_Clamp_Radian = 0.0f;
-                // 状态切换当周期先保持当前位置, 下一周期再执行上层最新目标
-                Target_DM_Radian = Now_DM_Radian;
-                Target_DM_Omega = 0.0f;
-                Target_DJI_Omega_Radian = 0.0f;
-                PID_Clamp.Set_Integral_Error(0.0f);
-                Cali_Stall_Count = 0;
-                Set_Cali_Status(Gripper_Cali_Status_CALIBRATED);
-            }
-            else if (Status[Now_Status_Serial].Time > (GRIPPER_DM_ENABLE_WAIT_TIME + GRIPPER_CALI_TIMEOUT))
-            {
-                // 超时后锁定失败状态, 需先失能再使能才能重试
-                Cali_Stall_Count = 0;
-                Set_Cali_Status(Gripper_Cali_Status_FAILED);
-            }
+        if ((Status[Now_Status_Serial].Time >= GRIPPER_CONTACT_CURRENT_RAMP_TIME) &&
+            (Math_Abs(Gripper_Data.Now_Clamp_Omega_Radian) < GRIPPER_STALL_OMEGA) &&
+            (DJI_Motor_Clamp.Get_Now_Torque() >= GRIPPER_GRIPPED_CURRENT))
+        {
+            Contact_Confirm_Count++;
+        }
+        else
+        {
+            Contact_Confirm_Count = 0;
+        }
+        if (Contact_Confirm_Count >= GRIPPER_CONTACT_CONFIRM_TIME)
+        {
+            Enter_Roll_Enabled_Status(Gripper_Clamp_Status_GRIPPED);
         }
     }
     break;
 
-    case (Gripper_Cali_Status_CALIBRATED):
+    case (Gripper_Clamp_Status_GRIPPED):
     {
-        // 上层失能但成员电机仍在线时保留校准结果
+        if (Gripper_Clamp_Command == Gripper_Clamp_Command_OPEN)
+        {
+            Start_Clamp_Motion(Gripper_Clamp_Command_OPEN);
+        }
     }
     break;
 
-    case (Gripper_Cali_Status_FAILED):
+    case (Gripper_Clamp_Status_TIMEOUT):
     {
-        // 先失能解除失败锁定, 下次使能重新校准
-        if (Gripper_Control_Type == Gripper_Control_Type_DISABLE)
+        if (Gripper_Clamp_Command != Timeout_Clamp_Command)
         {
-            Set_Cali_Status(Gripper_Cali_Status_UNCALIBRATED);
+            Start_Clamp_Motion(Gripper_Clamp_Command);
         }
     }
     break;
 
     default:
     {
-        Set_Cali_Status(Gripper_Cali_Status_UNCALIBRATED);
+        Set_Clamp_Status(Gripper_Clamp_Status_DISABLED);
     }
     break;
     }
@@ -295,10 +396,9 @@ void Class_Gripper::Reload_TIM_Status_PeriodElapsedCallback()
 
 void Class_Gripper::Calculate_Kinematics()
 {
-    // 达妙电机底层将-pmax~+pmax平移为0~2PI, 在夹爪层恢复为-PI~+PI模角度
+    // DM底层将-pmax~+pmax平移为0~2PI, 在夹爪层恢复为-PI~+PI模角度
     DM_Mod_Radian = Normalize_Angle_Radian_PI_to_PI(DM_Motor_Rotary.Get_Now_Angle() - PI);
 
-    // 夹爪层独立展开达妙电机模角, Now_DM_Radian与电机内部的n*2PI+q保持一致
     if ((DM_Motor_Rotary.Get_DM_Motor_Status() == DM_Motor_Status_ENABLE) && !DM_Radian_Initialized)
     {
         Pre_DM_Mod_Radian = DM_Mod_Radian;
@@ -312,50 +412,64 @@ void Class_Gripper::Calculate_Kinematics()
         Pre_DM_Mod_Radian = DM_Mod_Radian;
     }
 
-    Now_DJI_Radian = DJI_Motor_Clamp.Get_Now_Radian();
-    Now_Roll_Total_Radian = -Now_DM_Radian;
-    Now_Clamp_Raw_Radian = Now_DJI_Radian + GRIPPER_DM_FOLLOW_RATIO * Now_DM_Radian;
+    Now_Roll_Total_Radian = -GRIPPER_DM_TO_ROLL_RATIO * Now_DM_Radian;
 
-    // 正运动学解算
     Gripper_Data.Now_Roll_Radian = Normalize_Angle_Radian_PI_to_PI(Now_Roll_Total_Radian);
-    Gripper_Data.Now_Roll_Omega_Radian = -DM_Motor_Rotary.Get_Now_Omega();
-    Gripper_Data.Now_Clamp_Omega_Radian = DJI_Motor_Clamp.Get_Now_Omega_Radian() + GRIPPER_DM_FOLLOW_RATIO * DM_Motor_Rotary.Get_Now_Omega();
+    Gripper_Data.Now_Roll_Omega_Radian = -GRIPPER_DM_TO_ROLL_RATIO * DM_Motor_Rotary.Get_Now_Omega();
+    Gripper_Data.Now_Clamp_Omega_Radian = DJI_Motor_Clamp.Get_Now_Omega_Radian() + GRIPPER_DM_TO_ROLL_RATIO * DM_Motor_Rotary.Get_Now_Omega();
 
-    if (Gripper_Cali_Status == Gripper_Cali_Status_CALIBRATED)
-    {
-        Gripper_Data.Now_Clamp_Radian = Now_Clamp_Raw_Radian - Clamp_Open_Offset_Radian;
-    }
-    else
-    {
-        Gripper_Data.Now_Clamp_Radian = 0.0f;
-    }
-
-    // 正常控制状态下进行逆运动学解算
-    if ((Gripper_Cali_Status == Gripper_Cali_Status_CALIBRATED) && DM_Radian_Initialized)
+    if (DM_Radian_Initialized &&
+        ((Gripper_Clamp_Status == Gripper_Clamp_Status_OPENED) ||
+         (Gripper_Clamp_Status == Gripper_Clamp_Status_GRIPPED)))
     {
         Target_Roll_Radian = Normalize_Angle_Radian_PI_to_PI(Target_Roll_Radian);
-        Math_Constrain(&Target_Clamp_Radian, 0.0f, GRIPPER_CLAMP_MAX_RADIAN);
-
-        // 选择距离当前Roll最近的等价连续目标, 实现+-PI过零点连续转动
         float Delta_Target_Roll_Radian = Normalize_Angle_Radian_PI_to_PI(Target_Roll_Radian - Gripper_Data.Now_Roll_Radian);
-        // Now_DM_Radian是n*2PI+q, 在此基础上叠加相对变化量, 不能直接下发模角q
-        Target_DM_Radian = Now_DM_Radian - Delta_Target_Roll_Radian;
-        Target_Roll_Total_Radian = -Target_DM_Radian;
-        Target_DM_Omega = -Target_Roll_Omega_Radian;
-
-        // 夹爪张合位置外环输出主动开合速度, DM实际角速度前馈抵消Roll运动引起的被动开合
-        PID_Clamp.Set_Target(Target_Clamp_Radian);
-        PID_Clamp.Set_Now(Gripper_Data.Now_Clamp_Radian);
-        PID_Clamp.TIM_Adjust_PeriodElapsedCallback();
-        Target_DJI_Omega_Radian = PID_Clamp.Get_Out() - GRIPPER_DM_FOLLOW_RATIO * DM_Motor_Rotary.Get_Now_Omega();
-        Math_Constrain(&Target_DJI_Omega_Radian, -GRIPPER_DJI_OMEGA_MAX, GRIPPER_DJI_OMEGA_MAX);
+        Target_DM_Radian = Now_DM_Radian - Delta_Target_Roll_Radian / GRIPPER_DM_TO_ROLL_RATIO;
+        Target_Roll_Total_Radian = -GRIPPER_DM_TO_ROLL_RATIO * Target_DM_Radian;
+        Target_DM_Omega = -Target_Roll_Omega_Radian / GRIPPER_DM_TO_ROLL_RATIO;
     }
 }
 
-void Class_Gripper::Set_Cali_Status(Enum_Gripper_Cali_Status __Gripper_Cali_Status)
+void Class_Gripper::Set_Clamp_Status(Enum_Gripper_Clamp_Status __Gripper_Clamp_Status)
 {
-    Gripper_Cali_Status = __Gripper_Cali_Status;
-    Set_Status(static_cast<uint8_t>(__Gripper_Cali_Status));
+    Gripper_Clamp_Status = __Gripper_Clamp_Status;
+    Set_Status(static_cast<uint8_t>(__Gripper_Clamp_Status));
+}
+
+void Class_Gripper::Start_Clamp_Motion(Enum_Gripper_Clamp_Command __Gripper_Clamp_Command)
+{
+    Clamp_Hold_DM_Radian = Now_DM_Radian;
+    Target_DM_Radian = Now_DM_Radian;
+    Target_DM_Omega = 0.0f;
+    Target_Roll_Radian = Gripper_Data.Now_Roll_Radian;
+    Target_Roll_Total_Radian = Now_Roll_Total_Radian;
+    Target_DJI_Omega_Radian = 0.0f;
+    Clamp_Current = 0.0f;
+    Follow_Omega_Current = 0.0f;
+    Target_DJI_Output = 0.0f;
+    Contact_Confirm_Count = 0;
+    DJI_Motor_Clamp.PID_Omega.Set_Integral_Error(0.0f);
+
+    if (__Gripper_Clamp_Command == Gripper_Clamp_Command_OPEN)
+    {
+        Set_Clamp_Status(Gripper_Clamp_Status_OPENING);
+    }
+    else
+    {
+        Set_Clamp_Status(Gripper_Clamp_Status_CLOSING);
+    }
+}
+
+void Class_Gripper::Enter_Roll_Enabled_Status(Enum_Gripper_Clamp_Status __Gripper_Clamp_Status)
+{
+    Target_Roll_Radian = Gripper_Data.Now_Roll_Radian;
+    Target_Roll_Total_Radian = Now_Roll_Total_Radian;
+    Target_DM_Radian = Now_DM_Radian;
+    Target_DM_Omega = 0.0f;
+    Target_DJI_Omega_Radian = 0.0f;
+    Contact_Confirm_Count = 0;
+    DJI_Motor_Clamp.PID_Omega.Set_Integral_Error(0.0f);
+    Set_Clamp_Status(__Gripper_Clamp_Status);
 }
 
 void Class_Gripper::Reset_DM_Multi_Turn_Radian()
@@ -382,4 +496,5 @@ void Class_Gripper::TIM_Alive_PeriodElapsedCallback()
     DM_Motor_Rotary.TIM_Alive_PeriodElapsedCallback();
     DJI_Motor_Clamp.TIM_Alive_PeriodElapsedCallback();
 }
+
 /************************ COPYRIGHT(C) NEUQ-MOSASAURUS **************************/
