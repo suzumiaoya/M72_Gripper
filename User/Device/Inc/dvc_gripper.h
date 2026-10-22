@@ -22,30 +22,61 @@
 
 /* Exported types ------------------------------------------------------------*/
 
-// 特化类达妙电机控制方式枚举
-enum Enum_DM_Motor_PID_Control_Method
-{
-    DM_Motor_Control_Method_PID_OPENLOOP = 0,
-    DM_Motor_Control_Method_PID_OMEGA,
-    DM_Motor_Control_Method_PID_POSITION,
-};
-
-// 特化类达妙电机，支持在MIT模式下进行PID控制
-class Class_DM_Motor_J4310_PID : public Class_DM_Motor_J4310
+// 夹爪特化类达妙电机
+class Class_Gripper_DM_Motor : public Class_DM_Motor_J4310
 {
 public:
-    Class_PID PID_Omega;
-    Class_PID PID_Position;
+    void CAN_RxCpltCallback(uint8_t *Rx_Data);
+    void TIM_Alive_PeriodElapsedCallback();
+    void Reset_Multi_Turn_Radian();
 
-    void Init(FDCAN_HandleTypeDef *hcan, Enum_DM_Motor_ID __CAN_ID, Enum_DM_Motor_PID_Control_Method __Control_Method = DM_Motor_Control_Method_PID_OPENLOOP, int32_t __Position_Offset = 0, float __Omega_Max = 20.94359f, float __Torque_Max = 10.0f);
-
-    inline void Set_DM_Motor_Control_Method(Enum_DM_Motor_PID_Control_Method __DM_Motor_Control_Method);
-    inline Enum_DM_Motor_PID_Control_Method Get_DM_Motor_Control_Method();
-    
-    void TIM_PID_PeriodElapsedCallback();
+    inline float Get_Now_Multi_Turn_Radian();
+    inline bool Get_Radian_Initialized();
 
 private:
-    Enum_DM_Motor_PID_Control_Method DM_Motor_PID_Control_Method = DM_Motor_Control_Method_PID_OPENLOOP;
+    bool DM_Radian_Initialized = false;
+    // 离线期间收到的新反馈，留到在线检测确认后再处理；重置时一并清除
+    bool Feedback_Pending = false;
+    float DM_Mod_Radian = 0.0f;
+    float Pre_DM_Mod_Radian = 0.0f;
+    float Now_DM_Radian = 0.0f;
+
+    // 基类驱动解包后进行二次处理；因为基类的Data_Process非虚函数所以没有采用重写的方式实现
+    void Multi_Turn_Radian_Data_Process();
+};
+
+enum Enum_Gripper_DJI_Control_Method
+{
+    Gripper_DJI_Control_Method_CURRENT = 0,
+    Gripper_DJI_Control_Method_OMEGA,
+    Gripper_DJI_Control_Method_CLAMP_FOLLOW,
+};
+
+// 夹爪特化M2006子类，实现电流与速度闭环
+class Class_Gripper_DJI_Motor : public Class_DJI_Motor_C610
+{
+public:
+    // 直接电流、普通速度环、夹持电流叠加随动速度环，目标速度均为电机输出轴rad/s
+    void Set_Current_Control(float __Target_Current);
+    void Set_Omega_Control(float __Target_Omega_Radian);
+    void Set_Clamp_Follow_Control(float __Clamp_Current, float __Target_Omega_Radian);
+    // 保留原有行为，仅清除速度环积分
+    void Reset_Omega_PID();
+    // 每控制周期调用一次，完成计算并写入CAN发送缓存
+    void TIM_Control_PeriodElapsedCallback();
+
+    inline float Get_Clamp_Current();
+    inline float Get_Follow_Omega_Current();
+    inline float Get_Target_Output();
+
+private:
+    Enum_Gripper_DJI_Control_Method Gripper_DJI_Control_Method = Gripper_DJI_Control_Method_CURRENT;
+    float Target_Current = 0.0f;
+    // 仅夹持随动模式使用的基础电流与随动电流分量
+    float Clamp_Current = 0.0f;
+    float Follow_Omega_Current = 0.0f;
+    // 当前模式计算得到的电流指令，Out为实际下发值
+    float Target_Output = 0.0f;
 };
 
 
@@ -63,6 +94,7 @@ enum Enum_Gripper_Clamp_Command
     Gripper_Clamp_Command_CLOSE,
 };
 
+// 夹爪张合状态机枚举
 enum Enum_Gripper_Clamp_Status
 {
     Gripper_Clamp_Status_DISABLED = 0,
@@ -118,8 +150,8 @@ public:
 
 private:
     // 成员电机子类
-    Class_DM_Motor_J4310 DM_Motor_Rotary;
-    Class_DJI_Motor_C610 DJI_Motor_Clamp;
+    Class_Gripper_DM_Motor DM_Motor_Rotary;
+    Class_Gripper_DJI_Motor DJI_Motor_Clamp;
 
     //夹爪自身控制状态
     Enum_Gripper_Control_Type Gripper_Control_Type = Gripper_Control_Type_DISABLE;
@@ -137,9 +169,9 @@ private:
 
     // 夹持基础电流映射值
     float Clamp_Current = 0.0f;
-    // 为抵消Roll运动而手动计算的M2006速度环输出
+    // 夹持模式中M2006随动速度环的电流输出反馈
     float Follow_Omega_Current = 0.0f;
-    // 夹持电流与速度环叠加后的目标输出
+    // M2006当前控制模式计算得到的电流指令反馈
     float Target_DJI_Output = 0.0f;
     // M2006电机类内部实际下发的输出映射值
     float Now_DJI_Output = 0.0f;
@@ -154,20 +186,15 @@ private:
     float Contact_Start_Current = 0.0f;
     uint16_t Contact_Confirm_Count = 0;
 
-    // 达妙电机底层反馈转换后的模角度及夹爪层连续角度
-    bool DM_Radian_Initialized = false;
-    float DM_Mod_Radian = 0.0f;
-    float Pre_DM_Mod_Radian = 0.0f;
-    float Now_DM_Radian = 0.0f;
-    // 内部连续Roll角度, 用于运动学及Ozone调试
+    // 旋转齿轮的连续角度及角速度，已包含DM到齿轮的传动比和方向
     float Now_Roll_Total_Radian = 0.0f;
+    float Now_Roll_Gear_Omega_Radian = 0.0f;
 
     void Output();
     void Set_Clamp_Status(Enum_Gripper_Clamp_Status __Gripper_Clamp_Status);
     void Start_Clamp_Motion(Enum_Gripper_Clamp_Command __Gripper_Clamp_Command);
     void Enter_Roll_Enabled_Status(Enum_Gripper_Clamp_Status __Gripper_Clamp_Status);
-    void Reset_DM_Multi_Turn_Radian();
-    // 17:34外啮合机构的Roll正逆运动学及相对张合速度解算
+    // 外啮合机构的Roll正逆运动学及相对张合速度解算
     void Calculate_Kinematics();
 };
 
@@ -234,14 +261,29 @@ inline Enum_DJI_Motor_Status Class_Gripper::Get_DJI_Motor_Clamp_Status()
     return DJI_Motor_Clamp.Get_DJI_Motor_Status();
 }
 
-inline void Class_DM_Motor_J4310_PID::Set_DM_Motor_Control_Method(Enum_DM_Motor_PID_Control_Method __DM_Motor_Control_Method)
+inline float Class_Gripper_DM_Motor::Get_Now_Multi_Turn_Radian()
 {
-    DM_Motor_PID_Control_Method = __DM_Motor_Control_Method;
+    return Now_DM_Radian;
 }
 
-inline Enum_DM_Motor_PID_Control_Method Class_DM_Motor_J4310_PID::Get_DM_Motor_Control_Method()
+inline bool Class_Gripper_DM_Motor::Get_Radian_Initialized()
 {
-    return DM_Motor_PID_Control_Method;
+    return DM_Radian_Initialized;
+}
+
+inline float Class_Gripper_DJI_Motor::Get_Clamp_Current()
+{
+    return Clamp_Current;
+}
+
+inline float Class_Gripper_DJI_Motor::Get_Follow_Omega_Current()
+{
+    return Follow_Omega_Current;
+}
+
+inline float Class_Gripper_DJI_Motor::Get_Target_Output()
+{
+    return Target_Output;
 }
 
 #endif
