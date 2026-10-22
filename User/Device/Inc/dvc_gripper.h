@@ -180,6 +180,7 @@ private:
     // 目标夹持基础电流映射值，不包含随动速度环输出
     float Target_Clamp_Current = 4000.0f;
 
+    // 对外的夹爪运动学数据结构体
     Struct_Gripper_Data Gripper_Data = {};
 
     // 张合状态机相关变量
@@ -202,6 +203,11 @@ private:
     void Enter_Roll_Enabled_Status(Enum_Gripper_Clamp_Status __Gripper_Clamp_Status);
     // 外啮合机构的Roll正逆运动学及相对张合速度解算
     void Calculate_Kinematics();
+
+    // 达妙电机数据处理函数
+    void DM_Motor_Angle_Transform();
+    // 重置达妙多圈角度
+    void Reset_DM_Multi_Turn_Radian();
 };
 
 /* Exported variables --------------------------------------------------------*/
