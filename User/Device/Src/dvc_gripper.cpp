@@ -24,8 +24,7 @@ const float GRIPPER_DJI_OUTPUT_MAX = 9000.0f;
 const float GRIPPER_OPEN_OMEGA = -3.0f;
 const float GRIPPER_CLOSE_OMEGA = 4.0f;
 
-// 夹持与外限位保持电流映射值
-const float GRIPPER_CLAMP_CURRENT = 4000.0f;
+// 外限位保持电流映射值，夹持设定值保存在Target_Clamp_Current中
 const float GRIPPER_OPEN_HOLD_CURRENT = -1000.0f;
 
 // 接触与夹紧判定参数
@@ -36,7 +35,6 @@ const float GRIPPER_OPEN_STALL_CURRENT = GRIPPER_STALL_CURRENT_RATIO * GRIPPER_D
     ((GRIPPER_OPEN_OMEGA < 0.0f) ? -GRIPPER_OPEN_OMEGA : GRIPPER_OPEN_OMEGA);
 const float GRIPPER_CLOSE_STALL_CURRENT = GRIPPER_STALL_CURRENT_RATIO * GRIPPER_DJI_OMEGA_KP *
     ((GRIPPER_CLOSE_OMEGA < 0.0f) ? -GRIPPER_CLOSE_OMEGA : GRIPPER_CLOSE_OMEGA);
-const float GRIPPER_GRIPPED_CURRENT = GRIPPER_STALL_CURRENT_RATIO * GRIPPER_CLAMP_CURRENT;
 const uint16_t GRIPPER_CONTACT_IGNORE_TIME = 50;
 const uint16_t GRIPPER_CONTACT_CONFIRM_TIME = 20;
 const uint16_t GRIPPER_CONTACT_CURRENT_RAMP_TIME = 30;
@@ -46,6 +44,13 @@ const uint16_t GRIPPER_MOTION_TIMEOUT = 4000;
 const uint16_t GRIPPER_MOTION_STOP_TIME = 1000;
 
 /* Function prototypes -------------------------------------------------------*/
+
+void Class_Gripper_DM_Motor::Init(FDCAN_HandleTypeDef *hcan, Enum_DM_Motor_ID __CAN_ID, Enum_DM_Motor_Control_Method __Control_Method, float __PMAX, int32_t __Position_Offset, float __Omega_Max, float __Torque_Max)
+{
+    Class_DM_Motor_J4310::Init(hcan, __CAN_ID, __Control_Method, __Position_Offset, __Omega_Max, __Torque_Max);
+    PMAX = __PMAX;
+    Reset_Multi_Turn_Radian();
+}
 
 void Class_Gripper_DM_Motor::CAN_RxCpltCallback(uint8_t *Rx_Data)
 {
@@ -69,19 +74,29 @@ void Class_Gripper_DM_Motor::Multi_Turn_Radian_Data_Process()
     }
     Feedback_Pending = false;
 
-    // 当前PMAX=PI，基类以0~2PI表示单圈反馈，此处恢复为-PI~+PI模角度
-    DM_Mod_Radian = Normalize_Angle_Radian_PI_to_PI(Get_Now_Angle() - PI);
+    // Pre_Position是基类保存的本帧原始位置，不依赖其累计角度和位置映射
+    DM_Feedback_Radian = Math_Int_To_Float(Data.Pre_Position, 0, 65535, -PMAX, PMAX);
     if (!DM_Radian_Initialized)
     {
-        Pre_DM_Mod_Radian = DM_Mod_Radian;
-        Now_DM_Radian = DM_Mod_Radian;
+        // 首帧可能已经包含电机内部记录的多圈角度，必须完整保留
+        Pre_DM_Feedback_Radian = DM_Feedback_Radian;
+        Now_DM_Radian = DM_Feedback_Radian;
         DM_Radian_Initialized = true;
     }
     else
     {
-        float Delta_DM_Radian = Normalize_Angle_Radian_PI_to_PI(DM_Mod_Radian - Pre_DM_Mod_Radian);
+        float Delta_DM_Radian = DM_Feedback_Radian - Pre_DM_Feedback_Radian;
+        // 相邻反馈的实际转角应小于PMAX；跨越反馈边界时按2*PMAX还原增量
+        if (Delta_DM_Radian > PMAX)
+        {
+            Delta_DM_Radian -= 2.0f * PMAX;
+        }
+        else if (Delta_DM_Radian < -PMAX)
+        {
+            Delta_DM_Radian += 2.0f * PMAX;
+        }
         Now_DM_Radian += Delta_DM_Radian;
-        Pre_DM_Mod_Radian = DM_Mod_Radian;
+        Pre_DM_Feedback_Radian = DM_Feedback_Radian;
     }
 }
 
@@ -89,9 +104,16 @@ void Class_Gripper_DM_Motor::Reset_Multi_Turn_Radian()
 {
     DM_Radian_Initialized = false;
     Feedback_Pending = false;
-    DM_Mod_Radian = 0.0f;
-    Pre_DM_Mod_Radian = 0.0f;
+    DM_Feedback_Radian = 0.0f;
+    Pre_DM_Feedback_Radian = 0.0f;
     Now_DM_Radian = 0.0f;
+}
+
+void Class_Gripper_DJI_Motor::Init(FDCAN_HandleTypeDef *hcan, Enum_DJI_Motor_ID __CAN_ID, Enum_DJI_Motor_Control_Method __Control_Method, float __Gearbox_Rate)
+{
+    // Torque_Max与基类Output_Max均为10000，使目标值与CAN电流映射值一一对应
+    // 本子类的目标、速度环输出与Out均使用电流映射值；1000对应1A，不在此换算Nm
+    Class_DJI_Motor_C610::Init(hcan, __CAN_ID, __Control_Method, __Gearbox_Rate, 10000.0f);
 }
 
 void Class_Gripper_DJI_Motor::Set_Current_Control(float __Target_Current)
@@ -101,7 +123,7 @@ void Class_Gripper_DJI_Motor::Set_Current_Control(float __Target_Current)
     Target_Current = __Target_Current;
     Set_Target_Torque(__Target_Current);
     Set_Target_Omega_Radian(0.0f);
-    Clamp_Current = 0.0f;
+    Target_Clamp_Current = 0.0f;
 }
 
 void Class_Gripper_DJI_Motor::Set_Omega_Control(float __Target_Omega_Radian)
@@ -109,14 +131,14 @@ void Class_Gripper_DJI_Motor::Set_Omega_Control(float __Target_Omega_Radian)
     Gripper_DJI_Control_Method = Gripper_DJI_Control_Method_OMEGA;
     Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_OMEGA);
     Set_Target_Omega_Radian(__Target_Omega_Radian);
-    Clamp_Current = 0.0f;
+    Target_Clamp_Current = 0.0f;
 }
 
-void Class_Gripper_DJI_Motor::Set_Clamp_Follow_Control(float __Clamp_Current, float __Target_Omega_Radian)
+void Class_Gripper_DJI_Motor::Set_Clamp_Follow_Control(float __Target_Clamp_Current, float __Target_Omega_Radian)
 {
     Gripper_DJI_Control_Method = Gripper_DJI_Control_Method_CLAMP_FOLLOW;
     Set_DJI_Motor_Control_Method(DJI_Motor_Control_Method_TORQUE);
-    Clamp_Current = __Clamp_Current;
+    Target_Clamp_Current = __Target_Clamp_Current;
     Set_Target_Omega_Radian(__Target_Omega_Radian);
 }
 
@@ -127,12 +149,11 @@ void Class_Gripper_DJI_Motor::Reset_Omega_PID()
 
 void Class_Gripper_DJI_Motor::TIM_Control_PeriodElapsedCallback()
 {
-    Follow_Omega_Current = 0.0f;
     switch (Gripper_DJI_Control_Method)
     {
     case (Gripper_DJI_Control_Method_CURRENT):
     {
-        Target_Output = Target_Current;
+        Out = Target_Current;
     }
     break;
 
@@ -142,38 +163,43 @@ void Class_Gripper_DJI_Motor::TIM_Control_PeriodElapsedCallback()
         PID_Omega.Set_Target(Get_Target_Omega_Radian());
         PID_Omega.Set_Now(Get_Now_Omega_Radian());
         PID_Omega.TIM_Adjust_PeriodElapsedCallback();
-        Target_Output = PID_Omega.Get_Out();
+        Out = PID_Omega.Get_Out();
         if (Gripper_DJI_Control_Method == Gripper_DJI_Control_Method_CLAMP_FOLLOW)
         {
-            Follow_Omega_Current = Target_Output;
-            Target_Output = Clamp_Current + Follow_Omega_Current;
-            Math_Constrain(&Target_Output, 0.0f, GRIPPER_DJI_OUTPUT_MAX);
-            Set_Target_Torque(Target_Output);
+            Out = Target_Clamp_Current + PID_Omega.Get_Out();
+            Math_Constrain(&Out, 0.0f, GRIPPER_DJI_OUTPUT_MAX);
+            Set_Target_Torque(Out);
         }
     }
     break;
 
     default:
     {
-        Target_Output = 0.0f;
+        Out = 0.0f;
     }
     break;
     }
 
     // 基类Output仅将Out写入CAN发送缓存，不再调用基类PID回调重复闭环
-    Out = Target_Output;
     Output();
 }
 
 void Class_Gripper::Init()
 {
-    DM_Motor_Rotary.Init(&hfdcan2, DM_Motor_ID_0xA6, DM_Motor_Control_Method_POSITION_OMEGA, 0, 50.0f, 5.0f);
+    // PMAX必须与达妙上位机设置一致，其余参数使用子类默认值
+    DM_Motor_Rotary.Init(&hfdcan2, DM_Motor_ID_0xA6, DM_Motor_Control_Method_POSITION_OMEGA, PI);
     // 电流直接采用C610映射值，电流计算与打包由夹爪专用子类负责
-    DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_TORQUE, 36.0f, 10000.0f);
+    DJI_Motor_Clamp.Init(&hfdcan1, DJI_Motor_ID_0x204, DJI_Motor_Control_Method_TORQUE, 36.0f);
     DJI_Motor_Clamp.Set_Out(0.0f);
 
     DJI_Motor_Clamp.PID_Omega.Init(GRIPPER_DJI_OMEGA_KP, 0.0f, 0.0f, 0.0f, 0.0f, GRIPPER_DJI_OUTPUT_MAX);
     Class_FSM::Init(Gripper_Clamp_Status_NUM, Gripper_Clamp_Status_DISABLED);
+}
+
+void Class_Gripper::Set_Target_Clamp_Current(float __Target_Clamp_Current)
+{
+    Math_Constrain(&__Target_Clamp_Current, 0.0f, 4000.0f);
+    Target_Clamp_Current = __Target_Clamp_Current;
 }
 
 void Class_Gripper::Output()
@@ -190,10 +216,6 @@ void Class_Gripper::Output()
         DM_Motor_Rotary.Set_DM_Control_Status(DM_Motor_Control_Status_DISABLE);
         DM_Motor_Rotary.Set_Target_Omega(0.0f);
 
-        Clamp_Current = 0.0f;
-        Follow_Omega_Current = 0.0f;
-        Target_DJI_Output = 0.0f;
-        Target_DJI_Omega_Radian = 0.0f;
         DJI_Motor_Clamp.Set_Current_Control(0.0f);
         return;
     }
@@ -219,7 +241,6 @@ void Class_Gripper::Output()
         }
 
         // 夹持端不同状态下2006电机的对应行为
-        Follow_Omega_Current = 0.0f;
         switch (Gripper_Clamp_Status)
         {
         // 张合运行中状态
@@ -239,9 +260,7 @@ void Class_Gripper::Output()
             }
 
             // 2006电机输出值计算
-            Clamp_Current = 0.0f;
-            Target_DJI_Output = 0.0f;
-            Target_DJI_Omega_Radian = Motion_Omega + Now_Roll_Gear_Omega_Radian;
+            float Target_DJI_Omega_Radian = Motion_Omega + Now_Roll_Gear_Omega_Radian;
             DJI_Motor_Clamp.Set_Omega_Control(Target_DJI_Omega_Radian);
         }
         break;
@@ -249,28 +268,22 @@ void Class_Gripper::Output()
         // 接触状态，此状态下仅输出夹持力用于建立夹持
         case (Gripper_Clamp_Status_CONTACT):
         {
-            Target_DJI_Omega_Radian = 0.0f;
-            DJI_Motor_Clamp.Set_Current_Control(Clamp_Current);
+            DJI_Motor_Clamp.Set_Current_Control(Contact_Current);
         }
         break;
 
         // 夹持状态
         case (Gripper_Clamp_Status_GRIPPED):
         {
-            // 夹持力电流
-            Clamp_Current = GRIPPER_CLAMP_CURRENT;
-            // 随动角速度环
-            Target_DJI_Omega_Radian = Now_Roll_Gear_Omega_Radian;
-            DJI_Motor_Clamp.Set_Clamp_Follow_Control(Clamp_Current, Target_DJI_Omega_Radian);
+            // 按设定的夹持基础电流叠加随动角速度环输出
+            DJI_Motor_Clamp.Set_Clamp_Follow_Control(Target_Clamp_Current, Now_Roll_Gear_Omega_Radian);
         }
         break;
 
         // 张开状态
         case (Gripper_Clamp_Status_OPENED):
         {
-            Clamp_Current = GRIPPER_OPEN_HOLD_CURRENT;
-            Target_DJI_Omega_Radian = 0.0f;
-            DJI_Motor_Clamp.Set_Current_Control(Clamp_Current);
+            DJI_Motor_Clamp.Set_Current_Control(GRIPPER_OPEN_HOLD_CURRENT);
         }
         break;
 
@@ -278,9 +291,6 @@ void Class_Gripper::Output()
         case (Gripper_Clamp_Status_TIMEOUT):
         default:
         {
-            Clamp_Current = 0.0f;
-            Target_DJI_Omega_Radian = 0.0f;
-            Target_DJI_Output = 0.0f;
             DJI_Motor_Clamp.Set_Current_Control(0.0f);
         }
         break;
@@ -296,9 +306,6 @@ void Class_Gripper::TIM_Calculate_PeriodElapsedCallback()
     Output();
 
     DJI_Motor_Clamp.TIM_Control_PeriodElapsedCallback();
-    Follow_Omega_Current = DJI_Motor_Clamp.Get_Follow_Omega_Current();
-    Target_DJI_Output = DJI_Motor_Clamp.Get_Target_Output();
-    Now_DJI_Output = DJI_Motor_Clamp.Get_Out();
     DM_Motor_Rotary.TIM_Process_PeriodElapsedCallback();
 }
 
@@ -433,8 +440,8 @@ void Class_Gripper::Reload_TIM_Status_PeriodElapsedCallback()
         if (Contact_Confirm_Count >= GRIPPER_CONTACT_CONFIRM_TIME)
         {
             Contact_Start_Current = DJI_Motor_Clamp.Get_Out();
-            Math_Constrain(&Contact_Start_Current, 0.0f, GRIPPER_CLAMP_CURRENT);
-            Clamp_Current = Contact_Start_Current;
+            Math_Constrain(&Contact_Start_Current, 0.0f, Target_Clamp_Current);
+            Contact_Current = Contact_Start_Current;
             Contact_Confirm_Count = 0;
             Set_Clamp_Status(Gripper_Clamp_Status_CONTACT);
         }
@@ -452,11 +459,11 @@ void Class_Gripper::Reload_TIM_Status_PeriodElapsedCallback()
 
         float Ramp_Ratio = (float)Status[Now_Status_Serial].Time / (float)GRIPPER_CONTACT_CURRENT_RAMP_TIME;
         Math_Constrain(&Ramp_Ratio, 0.0f, 1.0f);
-        Clamp_Current = Contact_Start_Current + (GRIPPER_CLAMP_CURRENT - Contact_Start_Current) * Ramp_Ratio;
+        Contact_Current = Contact_Start_Current + (Target_Clamp_Current - Contact_Start_Current) * Ramp_Ratio;
 
         if ((Status[Now_Status_Serial].Time >= GRIPPER_CONTACT_CURRENT_RAMP_TIME) &&
             (Math_Abs(Gripper_Data.Now_Clamp_Omega_Radian) < GRIPPER_STALL_OMEGA) &&
-            (Math_Abs(DJI_Motor_Clamp.Get_Now_Torque()) >= GRIPPER_GRIPPED_CURRENT))
+            (Math_Abs(DJI_Motor_Clamp.Get_Now_Torque()) >= GRIPPER_STALL_CURRENT_RATIO * Target_Clamp_Current))
         {
             Contact_Confirm_Count++;
         }
@@ -516,7 +523,6 @@ void Class_Gripper::Calculate_Kinematics()
     {
         Target_Roll_Radian = Normalize_Angle_Radian_PI_to_PI(Target_Roll_Radian);
         float Delta_Target_Roll_Radian = Normalize_Angle_Radian_PI_to_PI(Target_Roll_Radian - Gripper_Data.Now_Roll_Radian);
-        Target_Roll_Total_Radian = Now_Roll_Total_Radian + Delta_Target_Roll_Radian;
         Target_DM_Radian = Now_DM_Radian + Delta_Target_Roll_Radian / (GRIPPER_DM_TO_ROLL_DIRECTION * GRIPPER_DM_TO_ROLL_RATIO);
         Target_DM_Omega = Target_Roll_Omega_Radian / (GRIPPER_DM_TO_ROLL_DIRECTION * GRIPPER_DM_TO_ROLL_RATIO);
     }
@@ -534,11 +540,7 @@ void Class_Gripper::Start_Clamp_Motion(Enum_Gripper_Clamp_Command __Gripper_Clam
     Target_DM_Radian = Clamp_Hold_DM_Radian;
     Target_DM_Omega = 0.0f;
     Target_Roll_Radian = Gripper_Data.Now_Roll_Radian;
-    Target_Roll_Total_Radian = Now_Roll_Total_Radian;
-    Target_DJI_Omega_Radian = 0.0f;
-    Clamp_Current = 0.0f;
-    Follow_Omega_Current = 0.0f;
-    Target_DJI_Output = 0.0f;
+    Contact_Current = 0.0f;
     Contact_Confirm_Count = 0;
     DJI_Motor_Clamp.Reset_Omega_PID();
 
@@ -555,10 +557,8 @@ void Class_Gripper::Start_Clamp_Motion(Enum_Gripper_Clamp_Command __Gripper_Clam
 void Class_Gripper::Enter_Roll_Enabled_Status(Enum_Gripper_Clamp_Status __Gripper_Clamp_Status)
 {
     Target_Roll_Radian = Gripper_Data.Now_Roll_Radian;
-    Target_Roll_Total_Radian = Now_Roll_Total_Radian;
     Target_DM_Radian = DM_Motor_Rotary.Get_Now_Multi_Turn_Radian();
     Target_DM_Omega = 0.0f;
-    Target_DJI_Omega_Radian = 0.0f;
     Contact_Confirm_Count = 0;
     DJI_Motor_Clamp.Reset_Omega_PID();
     Set_Clamp_Status(__Gripper_Clamp_Status);

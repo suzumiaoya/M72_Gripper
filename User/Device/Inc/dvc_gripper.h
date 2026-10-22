@@ -20,12 +20,19 @@
 
 /* Exported macros -----------------------------------------------------------*/
 
+// 按3A约对应1Nm估算：扭矩(Nm)乘此系数得到CAN电流映射值，不是安培值
+#define M2006_TORQUE_TO_CURRENT (3000.0f)
+
 /* Exported types ------------------------------------------------------------*/
 
 // 夹爪特化类达妙电机
 class Class_Gripper_DM_Motor : public Class_DM_Motor_J4310
 {
 public:
+    // CAN配置、工作模式与PMAX必填；PMAX单位rad，必须为正并与达妙上位机一致
+    // 位置偏移默认0，速度上限默认50rad/s，扭矩上限默认5Nm；后两项仍需与上位机一致
+    void Init(FDCAN_HandleTypeDef *hcan, Enum_DM_Motor_ID __CAN_ID, Enum_DM_Motor_Control_Method __Control_Method, float __PMAX, int32_t __Position_Offset = 0, float __Omega_Max = 50.0f, float __Torque_Max = 5.0f);
+
     void CAN_RxCpltCallback(uint8_t *Rx_Data);
     void TIM_Alive_PeriodElapsedCallback();
     void Reset_Multi_Turn_Radian();
@@ -34,17 +41,23 @@ public:
     inline bool Get_Radian_Initialized();
 
 private:
+    // 反馈范围为-PMAX~+PMAX，过零跳变的周期为2*PMAX，用于处理数据使用
+    float PMAX;
+    // 达妙通信稳定标志位，稳定后再开始圈数计算
     bool DM_Radian_Initialized = false;
     // 离线期间收到的新反馈，留到在线检测确认后再处理；重置时一并清除
     bool Feedback_Pending = false;
-    float DM_Mod_Radian = 0.0f;
-    float Pre_DM_Mod_Radian = 0.0f;
+    // 电机返回的未经多圈处理的角度
+    float DM_Feedback_Radian = 0.0f;
+    float Pre_DM_Feedback_Radian = 0.0f;
+    // 经下位机多圈处理后的角度
     float Now_DM_Radian = 0.0f;
 
-    // 基类驱动解包后进行二次处理；因为基类的Data_Process非虚函数所以没有采用重写的方式实现
+    // 使用基类解包的原始位置，独立完成角度映射和过零处理，不受原有的基类中Data_Process的影响
     void Multi_Turn_Radian_Data_Process();
 };
 
+// 夹爪特化的2006电机的工作模式
 enum Enum_Gripper_DJI_Control_Method
 {
     Gripper_DJI_Control_Method_CURRENT = 0,
@@ -56,27 +69,24 @@ enum Enum_Gripper_DJI_Control_Method
 class Class_Gripper_DJI_Motor : public Class_DJI_Motor_C610
 {
 public:
-    // 直接电流、普通速度环、夹持电流叠加随动速度环，目标速度均为电机输出轴rad/s
+    // 固定Torque_Max为10000，目标电流统一使用CAN映射值，仅使用电流映射值 (1A~1000) 作为输入
+    void Init(FDCAN_HandleTypeDef *hcan, Enum_DJI_Motor_ID __CAN_ID, Enum_DJI_Motor_Control_Method __Control_Method, float __Gearbox_Rate);
+
+    // 电流开环、角速度环、夹持随动速度环，目标速度均为电机输出轴rad/s
+    // 电流参数均为CAN映射值：1000对应1A，使用Nm设置时需先乘M2006_TORQUE_TO_CURRENT
     void Set_Current_Control(float __Target_Current);
     void Set_Omega_Control(float __Target_Omega_Radian);
-    void Set_Clamp_Follow_Control(float __Clamp_Current, float __Target_Omega_Radian);
+    void Set_Clamp_Follow_Control(float __Target_Clamp_Current, float __Target_Omega_Radian);
     // 保留原有行为，仅清除速度环积分
     void Reset_Omega_PID();
     // 每控制周期调用一次，完成计算并写入CAN发送缓存
     void TIM_Control_PeriodElapsedCallback();
 
-    inline float Get_Clamp_Current();
-    inline float Get_Follow_Omega_Current();
-    inline float Get_Target_Output();
-
 private:
     Enum_Gripper_DJI_Control_Method Gripper_DJI_Control_Method = Gripper_DJI_Control_Method_CURRENT;
     float Target_Current = 0.0f;
-    // 仅夹持随动模式使用的基础电流与随动电流分量
-    float Clamp_Current = 0.0f;
-    float Follow_Omega_Current = 0.0f;
-    // 当前模式计算得到的电流指令，Out为实际下发值
-    float Target_Output = 0.0f;
+    // 仅夹持随动模式使用的目标基础电流映射值，随动分量保存在PID_Omega的Out中
+    float Target_Clamp_Current = 0.0f;
 };
 
 
@@ -127,6 +137,10 @@ public:
     inline void Set_Target_Roll_Omega_Radian(float __Target_Roll_Omega_Radian);
     inline void Set_Gripper_Clamp_Command(Enum_Gripper_Clamp_Command __Gripper_Clamp_Command);
 
+    // 目标夹持基础电流，使用CAN映射值，限于0~4000；不包含随动速度环输出
+    void Set_Target_Clamp_Current(float __Target_Clamp_Current);
+    inline float Get_Target_Clamp_Current();
+
     inline float Get_Now_Roll_Radian();
     inline float Get_Now_Roll_Omega_Radian();
     inline float Get_Now_Clamp_Omega_Radian();
@@ -138,7 +152,7 @@ public:
     inline Enum_DM_Motor_Status Get_DM_Motor_Rotary_Status();
     inline Enum_DJI_Motor_Status Get_DJI_Motor_Clamp_Status();
 
-    // 1ms定时器解算回调, 内部已调用张合状态机, 上层不应再单独调用状态机
+    // 1ms定时器解算回调, 内部调用张合状态机, 上层不再单独调用状态机
     void TIM_Calculate_PeriodElapsedCallback();
     // 张合及夹持状态机
     void Reload_TIM_Status_PeriodElapsedCallback();
@@ -160,21 +174,11 @@ private:
     float Target_Roll_Radian = 0.0f;
     float Target_Roll_Omega_Radian = 5.0f;
 
-    // 内部连续Roll目标角度
-    float Target_Roll_Total_Radian = 0.0f;
-
     float Target_DM_Radian = 0.0f;
     float Target_DM_Omega = 0.0f;
-    float Target_DJI_Omega_Radian = 0.0f;
 
-    // 夹持基础电流映射值
-    float Clamp_Current = 0.0f;
-    // 夹持模式中M2006随动速度环的电流输出反馈
-    float Follow_Omega_Current = 0.0f;
-    // M2006当前控制模式计算得到的电流指令反馈
-    float Target_DJI_Output = 0.0f;
-    // M2006电机类内部实际下发的输出映射值
-    float Now_DJI_Output = 0.0f;
+    // 目标夹持基础电流映射值，不包含随动速度环输出
+    float Target_Clamp_Current = 4000.0f;
 
     Struct_Gripper_Data Gripper_Data = {};
 
@@ -184,6 +188,8 @@ private:
     Enum_Gripper_Clamp_Status Gripper_Clamp_Status = Gripper_Clamp_Status_DISABLED;
     float Clamp_Hold_DM_Radian = 0.0f;
     float Contact_Start_Current = 0.0f;
+    // 接触阶段的瞬时斜坡电流，与最终夹持设定值分开保存
+    float Contact_Current = 0.0f;
     uint16_t Contact_Confirm_Count = 0;
 
     // 旋转齿轮的连续角度及角速度，已包含DM到齿轮的传动比和方向
@@ -219,6 +225,11 @@ inline void Class_Gripper::Set_Target_Roll_Omega_Radian(float __Target_Roll_Omeg
 inline void Class_Gripper::Set_Gripper_Clamp_Command(Enum_Gripper_Clamp_Command __Gripper_Clamp_Command)
 {
     Gripper_Clamp_Command = __Gripper_Clamp_Command;
+}
+
+inline float Class_Gripper::Get_Target_Clamp_Current()
+{
+    return Target_Clamp_Current;
 }
 
 inline float Class_Gripper::Get_Now_Roll_Radian()
@@ -269,21 +280,6 @@ inline float Class_Gripper_DM_Motor::Get_Now_Multi_Turn_Radian()
 inline bool Class_Gripper_DM_Motor::Get_Radian_Initialized()
 {
     return DM_Radian_Initialized;
-}
-
-inline float Class_Gripper_DJI_Motor::Get_Clamp_Current()
-{
-    return Clamp_Current;
-}
-
-inline float Class_Gripper_DJI_Motor::Get_Follow_Omega_Current()
-{
-    return Follow_Omega_Current;
-}
-
-inline float Class_Gripper_DJI_Motor::Get_Target_Output()
-{
-    return Target_Output;
 }
 
 #endif
